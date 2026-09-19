@@ -25,6 +25,9 @@
     --success:  #52ffb0;
     --radius:   10px;
     --titlebar: 38px;
+    /* Driven by Settings — every font-size in this sheet is multiplied by this. */
+    --font-scale: 1;
+    --card-min:   280px;
   }
 
   html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font-family: 'Syne', sans-serif; }
@@ -36,17 +39,17 @@
     display: flex; align-items: center; z-index: 300; -webkit-app-region: drag;
     padding: 0 14px; gap: 12px;
   }
-  .logo { font-size: 12px; font-weight: 800; letter-spacing: 0.14em; color: var(--accent); text-transform: uppercase; }
+  .logo { font-size: calc(12px * var(--font-scale)); font-weight: 800; letter-spacing: 0.14em; color: var(--accent); text-transform: uppercase; }
   .title-sep { width: 1px; height: 16px; background: var(--border2); }
   #root-folder-display {
-    font-size: 12px; color: var(--text3);
+    font-size: calc(12px * var(--font-scale)); color: var(--text3);
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 300px; flex: 1;
   }
   .title-spacer { flex: 1; }
   #change-folder-btn {
     -webkit-app-region: no-drag; padding: 5px 12px; background: var(--surface2);
     border: 1px solid var(--border2); color: var(--text2); border-radius: 6px;
-    font-family: 'Syne', sans-serif; font-size: 11px; font-weight: 600; cursor: pointer;
+    font-family: 'Syne', sans-serif; font-size: calc(11px * var(--font-scale)); font-weight: 600; cursor: pointer;
     letter-spacing: 0.04em; transition: border-color 0.15s, color 0.15s;
   }
   #change-folder-btn:hover { border-color: var(--accent); color: var(--accent); }
@@ -69,19 +72,19 @@
   #filters-bar::-webkit-scrollbar { height: 3px; }
   #filters-bar::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
 
-  .filter-label { font-size: 10px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text3); flex-shrink: 0; margin-right: 2px; }
+  .filter-label { font-size: calc(10px * var(--font-scale)); font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: var(--text3); flex-shrink: 0; margin-right: 2px; }
 
   /* ── Category dropdown ── */
   .cat-dropdown-wrap { position: relative; flex-shrink: 0; }
   .cat-dropdown-trigger {
     padding: 4px 10px 4px 12px; border-radius: 20px; border: 1px solid var(--border2);
     background: transparent; color: var(--text2); font-family: 'Syne', sans-serif;
-    font-size: 11px; font-weight: 600; cursor: pointer; white-space: nowrap;
+    font-size: calc(11px * var(--font-scale)); font-weight: 600; cursor: pointer; white-space: nowrap;
     transition: all 0.15s; letter-spacing: 0.03em; display: flex; align-items: center; gap: 6px;
   }
   .cat-dropdown-trigger:hover { border-color: var(--text2); color: var(--text); }
   .cat-dropdown-trigger.active { background: var(--accent); border-color: var(--accent); color: #0a0a0b; }
-  .cat-dropdown-trigger .trigger-arrow { font-size: 9px; opacity: 0.7; transition: transform 0.15s; }
+  .cat-dropdown-trigger .trigger-arrow { font-size: calc(9px * var(--font-scale)); opacity: 0.7; transition: transform 0.15s; }
   .cat-dropdown-trigger.open .trigger-arrow { transform: rotate(180deg); }
 
   .cat-dropdown-menu {
@@ -101,7 +104,7 @@
   .cat-search {
     width: 100%; padding: 5px 9px; background: var(--surface3);
     border: 1px solid var(--border2); border-radius: 5px; color: var(--text);
-    font-family: 'DM Mono', monospace; font-size: 11px; outline: none;
+    font-family: 'DM Mono', monospace; font-size: calc(11px * var(--font-scale)); outline: none;
     transition: border-color 0.15s;
   }
   .cat-search:focus { border-color: var(--accent); }
@@ -118,20 +121,20 @@
   .cat-dropdown-list::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
 
   .cat-option {
-    padding: 7px 10px; border-radius: 5px; font-size: 12px; font-weight: 600;
+    padding: 7px 10px; border-radius: 5px; font-size: calc(12px * var(--font-scale)); font-weight: 600;
     cursor: pointer; color: var(--text2); transition: background 0.1s, color 0.1s;
     white-space: nowrap; text-overflow: ellipsis;
   }
   .cat-option:hover { background: var(--surface3); color: var(--text); }
   .cat-option.active { background: var(--accent); color: #0a0a0b; }
-  .cat-option-empty { padding: 7px 10px; font-size: 11px; color: var(--text3); font-family: 'DM Mono', monospace; }
+  .cat-option-empty { padding: 7px 10px; font-size: calc(11px * var(--font-scale)); color: var(--text3); font-family: 'DM Mono', monospace; }
 
   .filter-divider { width: 1px; height: 20px; background: var(--border2); flex-shrink: 0; margin: 0 4px; }
 
   .sort-btn {
     padding: 4px 12px; border-radius: 20px; border: 1px solid var(--border2);
     background: transparent; color: var(--text2); font-family: 'Syne', sans-serif;
-    font-size: 12px; cursor: pointer; white-space: nowrap; flex-shrink: 0;
+    font-size: calc(12px * var(--font-scale)); cursor: pointer; white-space: nowrap; flex-shrink: 0;
     transition: all 0.15s; display: flex; align-items: center; gap: 5px;
   }
   .sort-btn:hover { border-color: var(--text2); color: var(--text); }
@@ -145,7 +148,7 @@
 
   #video-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(var(--card-min), 1fr));
     gap: 14px;
   }
 
@@ -183,11 +186,11 @@
 
   .vid-card-body { padding: 10px 12px 11px; }
   .vid-card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; margin-bottom: 6px; }
-  .vid-name { font-size: 12px; font-weight: 700; color: var(--text); line-height: 1.3; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .vid-name { font-size: calc(12px * var(--font-scale)); font-weight: 700; color: var(--text); line-height: 1.3; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .vid-menu-btn {
     flex-shrink: 0; width: 22px; height: 22px; border: none; background: transparent;
     color: var(--text3); cursor: pointer; border-radius: 4px; display: flex;
-    align-items: center; justify-content: center; font-size: 15px; font-weight: 700;
+    align-items: center; justify-content: center; font-size: calc(15px * var(--font-scale)); font-weight: 700;
     transition: background 0.12s, color 0.12s; margin-top: -2px;
   }
   .vid-menu-btn:hover { background: var(--surface3); color: var(--text); }
@@ -195,10 +198,10 @@
   .vid-card-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .vid-category {
     padding: 2px 8px; background: var(--surface3); border: 1px solid var(--border2);
-    border-radius: 4px; font-size: 11px; font-weight: 700; color: var(--text2);
+    border-radius: 4px; font-size: calc(11px * var(--font-scale)); font-weight: 700; color: var(--text2);
     letter-spacing: 0.05em; text-transform: uppercase; white-space: nowrap;
   }
-  .vid-meta-text { font-size: 11px; color: var(--text3); display: flex; gap: 6px; flex-wrap: wrap; }
+  .vid-meta-text { font-size: calc(11px * var(--font-scale)); color: var(--text3); display: flex; gap: 6px; flex-wrap: wrap; }
 
   /* ── Card dropdown ── */
   .vid-dropdown {
@@ -210,7 +213,7 @@
   }
   .vid-dropdown.open { display: flex; }
   .vid-dropdown-item {
-    padding: 7px 10px; border-radius: 4px; font-size: 12px; font-weight: 600;
+    padding: 7px 10px; border-radius: 4px; font-size: calc(12px * var(--font-scale)); font-weight: 600;
     cursor: pointer; color: var(--text2); transition: background 0.1s, color 0.1s;
     display: flex; align-items: center; gap: 8px; white-space: nowrap;
   }
@@ -224,13 +227,13 @@
     gap: 14px; color: var(--text3); padding: 80px 20px; text-align: center;
   }
   #grid-empty.show { display: flex; }
-  #grid-empty .big-icon { font-size: 48px; opacity: 0.25; }
-  #grid-empty h2 { font-size: 16px; font-weight: 700; color: var(--text2); }
-  #grid-empty p { font-size: 12px; line-height: 1.7; max-width: 280px; }
+  #grid-empty .big-icon { font-size: calc(48px * var(--font-scale)); opacity: 0.25; }
+  #grid-empty h2 { font-size: calc(16px * var(--font-scale)); font-weight: 700; color: var(--text2); }
+  #grid-empty p { font-size: calc(12px * var(--font-scale)); line-height: 1.7; max-width: 280px; }
   .open-btn {
     margin-top: 6px; padding: 9px 22px; background: var(--accent); color: #0a0a0b;
     border: none; border-radius: 7px; font-family: 'Syne', sans-serif;
-    font-weight: 700; font-size: 12px; cursor: pointer; letter-spacing: 0.05em;
+    font-weight: 700; font-size: calc(12px * var(--font-scale)); cursor: pointer; letter-spacing: 0.05em;
     transition: background 0.15s, transform 0.1s; text-transform: uppercase;
   }
   .open-btn:hover { background: var(--accent2); }
@@ -260,13 +263,13 @@
     display: flex; align-items: center; gap: 10px;
     padding: 14px 18px; border-bottom: 1px solid var(--border); flex-shrink: 0;
   }
-  #modal-filename { font-size: 13px; font-weight: 700; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  #modal-category { padding: 2px 8px; background: var(--surface3); border: 1px solid var(--border2); border-radius: 4px; font-size: 10px; font-weight: 700; color: var(--text2); letter-spacing: 0.05em; text-transform: uppercase; flex-shrink: 0; }
-  #modal-duration { font-family: 'DM Mono', monospace; font-size: 11px; color: var(--text2); flex-shrink: 0; }
+  #modal-filename { font-size: calc(13px * var(--font-scale)); font-weight: 700; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #modal-category { padding: 2px 8px; background: var(--surface3); border: 1px solid var(--border2); border-radius: 4px; font-size: calc(10px * var(--font-scale)); font-weight: 700; color: var(--text2); letter-spacing: 0.05em; text-transform: uppercase; flex-shrink: 0; }
+  #modal-duration { font-family: 'DM Mono', monospace; font-size: calc(11px * var(--font-scale)); color: var(--text2); flex-shrink: 0; }
   #modal-explorer-btn {
     padding: 5px 11px; background: transparent; border: 1px solid var(--border2);
     color: var(--text2); border-radius: 5px; font-family: 'Syne', sans-serif;
-    font-size: 11px; font-weight: 600; cursor: pointer; display: flex; align-items: center;
+    font-size: calc(11px * var(--font-scale)); font-weight: 600; cursor: pointer; display: flex; align-items: center;
     gap: 5px; transition: border-color 0.15s, color 0.15s; flex-shrink: 0;
   }
   #modal-explorer-btn:hover { border-color: var(--text); color: var(--text); }
@@ -335,7 +338,7 @@
 
   #time-display {
     display: flex; justify-content: space-between; align-items: center;
-    font-family: 'DM Mono', monospace; font-size: 11px; color: var(--text2);
+    font-family: 'DM Mono', monospace; font-size: calc(11px * var(--font-scale)); color: var(--text2);
     margin-bottom: 12px; padding: 0 2px;
   }
   #time-display .sel-duration { color: var(--accent); font-weight: 500; }
@@ -350,7 +353,7 @@
   .play-sel-btn {
     padding: 0 14px; height: 36px; background: var(--surface2); border: 1px solid var(--border2);
     border-radius: 6px; color: var(--text); cursor: pointer; font-family: 'Syne', sans-serif;
-    font-size: 11px; font-weight: 600; letter-spacing: 0.04em; display: flex; align-items: center;
+    font-size: calc(11px * var(--font-scale)); font-weight: 600; letter-spacing: 0.04em; display: flex; align-items: center;
     gap: 6px; transition: background 0.15s; flex-shrink: 0;
   }
   .play-sel-btn:hover { background: var(--border2); }
@@ -377,7 +380,7 @@
   .flex-spacer { flex: 1; }
   .trim-btn {
     height: 36px; padding: 0 18px; border: none; border-radius: 6px;
-    font-family: 'Syne', sans-serif; font-weight: 700; font-size: 12px;
+    font-family: 'Syne', sans-serif; font-weight: 700; font-size: calc(12px * var(--font-scale));
     letter-spacing: 0.06em; cursor: pointer; transition: background 0.15s, transform 0.1s;
     display: flex; align-items: center; text-transform: uppercase; flex-shrink: 0;
   }
@@ -393,8 +396,8 @@
     display: none; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
   }
   #progress-overlay.show { display: flex; }
-  #progress-overlay .prog-title { font-size: 16px; font-weight: 700; }
-  #progress-overlay .prog-sub { font-size: 12px; color: var(--text2); font-family: 'DM Mono', monospace; }
+  #progress-overlay .prog-title { font-size: calc(16px * var(--font-scale)); font-weight: 700; }
+  #progress-overlay .prog-sub { font-size: calc(12px * var(--font-scale)); color: var(--text2); font-family: 'DM Mono', monospace; }
   .spinner { width: 40px; height: 40px; border: 3px solid var(--border2); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -402,13 +405,268 @@
   #toast {
     position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(80px);
     background: var(--surface2); border: 1px solid var(--border2); border-radius: 8px;
-    padding: 11px 20px; font-size: 13px; font-weight: 600; z-index: 500;
+    padding: 11px 20px; font-size: calc(13px * var(--font-scale)); font-weight: 600; z-index: 500;
     transition: transform 0.25s cubic-bezier(.34,1.56,.64,1), opacity 0.25s;
     pointer-events: none; white-space: nowrap; opacity: 0;
   }
   #toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
   #toast.success { border-color: var(--success); color: var(--success); }
   #toast.error   { border-color: var(--danger);  color: var(--danger); }
+
+  /* ── Quality badge on cards ── */
+  .vid-badges {
+    position: absolute; left: 8px; bottom: 8px; z-index: 6;
+    display: flex; gap: 5px; pointer-events: none;
+  }
+  .q-badge {
+    padding: 2px 7px; border-radius: 4px;
+    font-family: 'DM Mono', monospace; font-size: calc(10px * var(--font-scale)); font-weight: 500;
+    letter-spacing: 0.04em; line-height: 1.5;
+    background: rgba(10,10,11,0.78); border: 1px solid rgba(255,255,255,0.14);
+    color: #e6e6ec; backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
+    white-space: nowrap;
+  }
+  .q-badge.res-high  { border-color: rgba(232,255,71,0.45); color: var(--accent); }
+  .q-badge.res-low   { border-color: rgba(255,255,255,0.14); color: var(--text2); }
+  .q-badge.codec-av1 { border-color: rgba(82,255,176,0.45); color: var(--success); }
+  .q-badge.pending   { opacity: 0.35; }
+
+  /* ── Encode modal ── */
+  #encode-overlay {
+    position: fixed; inset: 0; z-index: 250;
+    background: rgba(10,10,11,0.72);
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    display: none; align-items: center; justify-content: center; padding: 20px;
+  }
+  #encode-overlay.open { display: flex; }
+
+  #encode-modal {
+    background: var(--surface); border: 1px solid var(--border2);
+    border-radius: 14px; width: 780px; max-width: 100%; max-height: 90vh;
+    display: flex; flex-direction: column; overflow: hidden;
+    box-shadow: 0 32px 80px rgba(0,0,0,0.7);
+  }
+
+  #encode-header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 17px 24px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  #encode-title { font-size: calc(14px * var(--font-scale)); font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); white-space: nowrap; }
+  #encode-subject { font-size: calc(12.5px * var(--font-scale)); color: var(--text2); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #encode-close-btn {
+    width: 28px; height: 28px; border: none; background: var(--surface2); cursor: pointer;
+    color: var(--text2); display: flex; align-items: center; justify-content: center;
+    border-radius: 6px; transition: background 0.15s, color 0.15s; flex-shrink: 0;
+  }
+  #encode-close-btn:hover { background: var(--danger); color: #fff; }
+
+  #encode-body { padding: 22px 24px 24px; overflow-y: auto; flex: 1; }
+  #encode-body::-webkit-scrollbar { width: 6px; }
+  #encode-body::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+  /* Source summary */
+  #encode-source {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px;
+    background: var(--border); border: 1px solid var(--border);
+    border-radius: 8px; overflow: hidden; margin-bottom: 20px;
+  }
+  .src-cell { background: var(--surface2); padding: 11px 14px; }
+  .src-cell .src-k { font-size: calc(10px * var(--font-scale)); font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase; color: var(--text2); }
+  .src-cell .src-v { font-family: 'DM Mono', monospace; font-size: calc(13px * var(--font-scale)); color: var(--text); margin-top: 4px; }
+
+  #encode-note {
+    display: none; margin-bottom: 20px; padding: 12px 15px; border-radius: 7px;
+    font-size: calc(12.5px * var(--font-scale)); line-height: 1.6;
+    background: rgba(232,255,71,0.07); border: 1px solid rgba(232,255,71,0.28); color: #d6e89a;
+  }
+  #encode-note.show { display: block; }
+
+  /* Field rows */
+  .enc-field { margin-bottom: 22px; }
+  .enc-field:last-child { margin-bottom: 0; }
+  .enc-label {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
+    font-size: calc(10.5px * var(--font-scale)); font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--text2); margin-bottom: 9px;
+  }
+  .enc-label .enc-value { font-size: calc(12.5px * var(--font-scale)); color: var(--accent); letter-spacing: 0; text-transform: none; font-weight: 700; }
+  .enc-tip { font-size: calc(12px * var(--font-scale)); line-height: 1.6; color: var(--text2); margin-top: 8px; }
+  .enc-tip strong { color: var(--text); font-weight: 700; }
+
+  /* Segmented control */
+  .enc-seg { display: flex; gap: 7px; flex-wrap: wrap; }
+  .enc-seg button {
+    flex: 1 1 auto; min-width: 74px; padding: 10px 14px;
+    background: var(--surface2); border: 1px solid var(--border2); border-radius: 6px;
+    color: var(--text2); font-family: 'Syne', sans-serif; font-size: calc(12.5px * var(--font-scale)); font-weight: 600;
+    cursor: pointer; transition: all 0.13s; white-space: nowrap;
+  }
+  .enc-seg button:hover:not(.active):not(:disabled) { border-color: var(--text3); color: var(--text); }
+  .enc-seg button.active { background: var(--accent); border-color: var(--accent); color: #0a0a0b; }
+  .enc-seg button:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  /* Select + number input */
+  .enc-select, .enc-number {
+    width: 100%; padding: 10px 12px; background: var(--surface2);
+    border: 1px solid var(--border2); border-radius: 6px; color: var(--text);
+    font-family: 'Syne', sans-serif; font-size: calc(13px * var(--font-scale)); font-weight: 600;
+    outline: none; cursor: pointer; transition: border-color 0.15s;
+  }
+  .enc-number { font-family: 'DM Mono', monospace; cursor: text; }
+  .enc-select:focus, .enc-number:focus { border-color: var(--accent); }
+  .enc-select option { background: var(--surface2); color: var(--text); }
+
+  /* Slider */
+  .enc-slider {
+    -webkit-appearance: none; appearance: none; width: 100%; height: 4px;
+    border-radius: 2px; outline: none; cursor: pointer; background: var(--border2);
+  }
+  .enc-slider::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; width: 15px; height: 15px;
+    border-radius: 50%; background: var(--accent); cursor: pointer;
+    border: 2px solid var(--bg); transition: transform 0.12s;
+  }
+  .enc-slider:hover::-webkit-slider-thumb { transform: scale(1.15); }
+  .slider-scale {
+    display: flex; justify-content: space-between; margin-top: 7px;
+    font-size: calc(11px * var(--font-scale)); font-weight: 600; color: var(--text2);
+  }
+
+  .enc-row { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+
+  /* Estimate footer */
+  #encode-footer {
+    flex-shrink: 0; border-top: 1px solid var(--border);
+    padding: 17px 24px; display: flex; align-items: center; gap: 16px;
+  }
+  #encode-estimate { flex: 1; min-width: 0; }
+  #encode-estimate .est-line { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  #est-size { font-family: 'DM Mono', monospace; font-size: calc(19px * var(--font-scale)); font-weight: 500; color: var(--accent); }
+  #est-delta { font-size: calc(12.5px * var(--font-scale)); font-weight: 700; color: var(--text); }
+  #est-delta.grow { color: var(--danger); }
+  #encode-estimate .est-note { font-size: calc(11.5px * var(--font-scale)); line-height: 1.5; color: var(--text2); margin-top: 5px; }
+
+  #encode-save-new, #encode-replace {
+    min-height: 40px; padding: 0 20px; border: none; border-radius: 6px;
+    font-family: 'Syne', sans-serif; font-weight: 700; font-size: calc(12.5px * var(--font-scale));
+    letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer;
+    transition: background 0.15s, transform 0.1s; flex-shrink: 0;
+  }
+  #encode-save-new { background: var(--surface2); border: 1px solid var(--border2); color: var(--text); }
+  #encode-save-new:hover { background: var(--border2); }
+  #encode-replace { background: var(--accent); color: #0a0a0b; }
+  #encode-replace:hover { background: var(--accent2); }
+  #encode-save-new:active, #encode-replace:active { transform: scale(0.97); }
+
+  /* ── Determinate progress ── */
+  #prog-bar-wrap {
+    width: 300px; height: 5px; background: var(--surface3);
+    border-radius: 3px; overflow: hidden; display: none;
+  }
+  #prog-bar-wrap.show { display: block; }
+  #prog-bar { height: 100%; width: 0%; background: var(--accent); border-radius: 3px; transition: width 0.25s linear; }
+  #prog-cancel-btn {
+    display: none; margin-top: 4px; padding: 7px 18px; background: transparent;
+    border: 1px solid var(--border2); border-radius: 6px; color: var(--text2);
+    font-family: 'Syne', sans-serif; font-size: calc(11px * var(--font-scale)); font-weight: 600;
+    letter-spacing: 0.05em; cursor: pointer; transition: border-color 0.15s, color 0.15s;
+  }
+  #prog-cancel-btn.show { display: block; }
+  #prog-cancel-btn:hover { border-color: var(--danger); color: var(--danger); }
+  /* ── Settings modal ── */
+  #settings-overlay {
+    position: fixed; inset: 0; z-index: 260;
+    background: rgba(10,10,11,0.72);
+    backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+    display: none; align-items: center; justify-content: center; padding: 20px;
+  }
+  #settings-overlay.open { display: flex; }
+
+  #settings-modal {
+    background: var(--surface); border: 1px solid var(--border2);
+    border-radius: 14px; width: 620px; max-width: 100%; max-height: 90vh;
+    display: flex; flex-direction: column; overflow: hidden;
+    box-shadow: 0 32px 80px rgba(0,0,0,0.7);
+  }
+  #settings-header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 17px 24px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  #settings-title {
+    font-size: calc(14px * var(--font-scale)); font-weight: 800;
+    letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); flex: 1;
+  }
+  #settings-close-btn {
+    width: 28px; height: 28px; border: none; background: var(--surface2); cursor: pointer;
+    color: var(--text2); display: flex; align-items: center; justify-content: center;
+    border-radius: 6px; transition: background 0.15s, color 0.15s; flex-shrink: 0;
+  }
+  #settings-close-btn:hover { background: var(--danger); color: #fff; }
+
+  #settings-body { padding: 22px 24px 24px; overflow-y: auto; flex: 1; }
+  #settings-body::-webkit-scrollbar { width: 6px; }
+  #settings-body::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+  .set-group-label {
+    font-size: calc(10.5px * var(--font-scale)); font-weight: 700;
+    letter-spacing: 0.12em; text-transform: uppercase; color: var(--text3);
+    margin: 0 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border);
+  }
+  .set-group + .set-group { margin-top: 28px; }
+
+  /* Font-size preview */
+  #font-preview {
+    background: var(--surface2); border: 1px solid var(--border2);
+    border-radius: 8px; padding: 14px 16px; margin-top: 12px;
+  }
+  #font-preview .fp-row { display: flex; align-items: baseline; gap: 10px; margin-bottom: 7px; }
+  #font-preview .fp-name { font-size: calc(12px * var(--font-scale)); font-weight: 700; color: var(--text); }
+  #font-preview .fp-badge {
+    padding: 2px 7px; border-radius: 4px; font-family: 'DM Mono', monospace;
+    font-size: calc(10px * var(--font-scale)); background: rgba(10,10,11,0.78);
+    border: 1px solid rgba(232,255,71,0.45); color: var(--accent);
+  }
+  #font-preview .fp-tip {
+    font-size: calc(12px * var(--font-scale)); line-height: 1.6; color: var(--text2); margin: 0;
+  }
+
+  #settings-footer {
+    flex-shrink: 0; border-top: 1px solid var(--border);
+    padding: 15px 24px; display: flex; align-items: center; gap: 12px;
+  }
+  #settings-hint { flex: 1; font-size: calc(11.5px * var(--font-scale)); color: var(--text3); }
+  #settings-reset {
+    min-height: 36px; padding: 0 16px; background: transparent; border: 1px solid var(--border2);
+    border-radius: 6px; color: var(--text2); font-family: 'Syne', sans-serif;
+    font-size: calc(11.5px * var(--font-scale)); font-weight: 600; letter-spacing: 0.05em;
+    text-transform: uppercase; cursor: pointer; transition: border-color 0.15s, color 0.15s;
+  }
+  #settings-reset:hover { border-color: var(--danger); color: var(--danger); }
+  #settings-done {
+    min-height: 36px; padding: 0 22px; background: var(--accent); border: none;
+    border-radius: 6px; color: #0a0a0b; font-family: 'Syne', sans-serif;
+    font-size: calc(11.5px * var(--font-scale)); font-weight: 700; letter-spacing: 0.06em;
+    text-transform: uppercase; cursor: pointer; transition: background 0.15s;
+  }
+  #settings-done:hover { background: var(--accent2); }
+
+  /* Toggle switch */
+  .set-toggle-row {
+    display: flex; align-items: center; gap: 14px; cursor: pointer;
+  }
+  .set-toggle-row .set-toggle-text { flex: 1; min-width: 0; }
+  .set-switch {
+    flex-shrink: 0; width: 40px; height: 22px; border-radius: 11px;
+    background: var(--surface3); border: 1px solid var(--border2);
+    position: relative; transition: background 0.16s, border-color 0.16s;
+  }
+  .set-switch::after {
+    content: ''; position: absolute; top: 2px; left: 2px;
+    width: 16px; height: 16px; border-radius: 50%; background: var(--text3);
+    transition: transform 0.16s, background 0.16s;
+  }
+  .set-switch.on { background: rgba(232,255,71,0.2); border-color: var(--accent); }
+  .set-switch.on::after { transform: translateX(18px); background: var(--accent); }
 </style>
 </head>
 <body>
@@ -420,6 +678,12 @@
   <span id="root-folder-display">No folder selected</span>
   <div class="title-spacer"></div>
   <button id="change-folder-btn">Change Folder</button>
+  <button class="wc-btn" id="settings-btn" title="Settings">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="3"/>
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+    </svg>
+  </button>
   <button class="wc-btn" onclick="api.minimize()">
     <svg width="10" height="2" viewBox="0 0 10 2"><rect width="10" height="2" fill="currentColor"/></svg>
   </button>
@@ -536,11 +800,212 @@
   </button>
 </div>
 
+<!-- Encode Modal (compress / convert) -->
+<div id="encode-overlay">
+  <div id="encode-modal">
+    <div id="encode-header">
+      <span id="encode-title">Compress</span>
+      <span id="encode-subject">clip.mp4</span>
+      <button id="encode-close-btn">
+        <svg width="10" height="10" viewBox="0 0 10 10"><line x1="0" y1="0" x2="10" y2="10" stroke="currentColor" stroke-width="1.5"/><line x1="10" y1="0" x2="0" y2="10" stroke="currentColor" stroke-width="1.5"/></svg>
+      </button>
+    </div>
+
+    <div id="encode-body">
+      <div id="encode-source">
+        <div class="src-cell"><div class="src-k">Resolution</div><div class="src-v" id="src-res">—</div></div>
+        <div class="src-cell"><div class="src-k">Codec</div><div class="src-v" id="src-codec">—</div></div>
+        <div class="src-cell"><div class="src-k">Bitrate</div><div class="src-v" id="src-bitrate">—</div></div>
+        <div class="src-cell"><div class="src-k">Size</div><div class="src-v" id="src-size">—</div></div>
+      </div>
+
+      <div id="encode-note"></div>
+
+      <!-- Resolution -->
+      <div class="enc-field">
+        <div class="enc-label"><span>Resolution</span></div>
+        <div class="enc-seg" id="res-seg"></div>
+        <div class="enc-tip">
+          <strong>Lower resolution = much smaller file.</strong> Halving the height (1080p → 540p) quarters the pixel count,
+          so it is the single biggest size lever. Downscaling is irreversible — detail and text become permanently softer.
+        </div>
+      </div>
+
+      <!-- Rate control mode -->
+      <div class="enc-field">
+        <div class="enc-label"><span>Size control</span></div>
+        <div class="enc-seg" id="rate-seg">
+          <button data-rate="crf" class="active">Quality (CRF)</button>
+          <button data-rate="bitrate">Target bitrate</button>
+        </div>
+      </div>
+
+      <!-- CRF -->
+      <div class="enc-field" id="crf-field">
+        <div class="enc-label"><span>Quality</span><span class="enc-value" id="crf-value">CRF 23 · Good</span></div>
+        <input class="enc-slider" id="crf-slider" type="range" min="16" max="34" step="1" value="23" />
+        <div class="slider-scale"><span>16 — bigger, sharper</span><span>34 — smaller, blockier</span></div>
+        <div class="enc-tip" id="crf-tip"></div>
+      </div>
+
+      <!-- Bitrate -->
+      <div class="enc-field" id="bitrate-field" style="display:none">
+        <div class="enc-label"><span>Video bitrate</span><span class="enc-value">kbit/s</span></div>
+        <input class="enc-number" id="bitrate-input" type="number" min="200" max="80000" step="100" value="4000" />
+        <div class="enc-tip">
+          <strong>Bitrate fixes the file size, not the quality.</strong> The encoder must hit this number, so busy scenes
+          get blocky when it is too low. Quality (CRF) mode is usually the better choice unless you need to land under a
+          hard upload limit.
+        </div>
+      </div>
+
+      <div class="enc-row">
+        <!-- Framerate -->
+        <div class="enc-field">
+          <div class="enc-label"><span>Framerate</span></div>
+          <select class="enc-select" id="fps-select">
+            <option value="">Keep original</option>
+            <option value="60">60 fps</option>
+            <option value="30">30 fps</option>
+            <option value="24">24 fps</option>
+          </select>
+          <div class="enc-tip">Halving fps cuts roughly 25–35% off the size, but motion looks choppier. Keep 60 for gameplay.</div>
+        </div>
+
+        <!-- Audio -->
+        <div class="enc-field">
+          <div class="enc-label"><span>Audio</span></div>
+          <select class="enc-select" id="audio-select">
+            <option value="copy">Keep original</option>
+            <option value="192">Re-encode 192 kbps</option>
+            <option value="128">Re-encode 128 kbps</option>
+            <option value="96">Re-encode 96 kbps</option>
+            <option value="none">Remove audio</option>
+          </select>
+          <div class="enc-tip">Audio is a small slice of the total. Only worth touching on long, quiet clips.</div>
+        </div>
+      </div>
+
+      <div class="enc-row">
+        <!-- Encoder -->
+        <div class="enc-field">
+          <div class="enc-label"><span>Encoder</span></div>
+          <select class="enc-select" id="encoder-select"></select>
+          <div class="enc-tip" id="encoder-tip"></div>
+        </div>
+
+        <!-- Speed -->
+        <div class="enc-field">
+          <div class="enc-label"><span>Speed</span><span class="enc-value" id="speed-value">Medium</span></div>
+          <input class="enc-slider" id="speed-slider" type="range" min="0" max="7" step="1" value="5" />
+          <div class="slider-scale"><span>fast</span><span>efficient</span></div>
+          <div class="enc-tip">Slower presets spend more CPU finding savings — same quality, smaller file, longer wait.</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="encode-footer">
+      <div id="encode-estimate">
+        <div class="est-line">
+          <span id="est-size">—</span>
+          <span id="est-delta"></span>
+        </div>
+        <div class="est-note">Estimated — real size depends on how much motion and detail the clip has.</div>
+      </div>
+      <button id="encode-save-new">Save as new</button>
+      <button id="encode-replace">Replace original</button>
+    </div>
+  </div>
+</div>
+
+<!-- Settings Modal -->
+<div id="settings-overlay">
+  <div id="settings-modal">
+    <div id="settings-header">
+      <span id="settings-title">Settings</span>
+      <button id="settings-close-btn">
+        <svg width="10" height="10" viewBox="0 0 10 10"><line x1="0" y1="0" x2="10" y2="10" stroke="currentColor" stroke-width="1.5"/><line x1="10" y1="0" x2="0" y2="10" stroke="currentColor" stroke-width="1.5"/></svg>
+      </button>
+    </div>
+
+    <div id="settings-body">
+
+      <div class="set-group">
+        <div class="set-group-label">Appearance</div>
+
+        <div class="enc-field">
+          <div class="enc-label"><span>Font size</span><span class="enc-value" id="fontsize-value">100%</span></div>
+          <input class="enc-slider" id="fontsize-slider" type="range" min="80" max="140" step="5" value="100" />
+          <div class="slider-scale"><span>80% — compact</span><span>140% — large</span></div>
+          <div id="font-preview">
+            <div class="fp-row">
+              <span class="fp-name">clip_2026-09-19.mp4</span>
+              <span class="fp-badge">1080p60</span>
+            </div>
+            <p class="fp-tip">Scales every label, button and tip in the app. Window chrome and icons stay put, so nothing gets clipped.</p>
+          </div>
+        </div>
+
+        <div class="enc-field">
+          <div class="enc-label"><span>Card size</span></div>
+          <div class="enc-seg" id="cardsize-seg">
+            <button data-min="220">Small</button>
+            <button data-min="280" class="active">Medium</button>
+            <button data-min="360">Large</button>
+            <button data-min="460">Huge</button>
+          </div>
+          <div class="enc-tip">How wide each clip card is before the grid wraps to another column. Larger cards mean fewer per row and bigger thumbnails.</div>
+        </div>
+      </div>
+
+      <div class="set-group">
+        <div class="set-group-label">Browsing</div>
+
+        <div class="enc-field">
+          <div class="set-toggle-row" id="hoverpreview-row">
+            <div class="set-toggle-text">
+              <div class="enc-label" style="margin-bottom:6px"><span>Play preview on hover</span></div>
+              <div class="enc-tip" style="margin-top:0">Plays the clip in its card when you hover it. Turn off if scrolling feels heavy on a large folder.</div>
+            </div>
+            <div class="set-switch on" id="hoverpreview-switch"></div>
+          </div>
+        </div>
+
+        <div class="enc-field" style="margin-bottom:0">
+          <div class="enc-label"><span>Thumbnail frame</span><span class="enc-value" id="thumbtime-value">3s</span></div>
+          <input class="enc-slider" id="thumbtime-slider" type="range" min="0" max="15" step="1" value="3" />
+          <div class="slider-scale"><span>0s — first frame</span><span>15s — later in</span></div>
+          <div class="enc-tip">Which moment to grab each card's still from. Bump it up if your clips open on a black intro or a loading screen.</div>
+        </div>
+      </div>
+
+      <div class="set-group">
+        <div class="set-group-label">Encoding</div>
+
+        <div class="enc-field" style="margin-bottom:0">
+          <div class="enc-label"><span>Default encoder</span></div>
+          <select class="enc-select" id="default-encoder-select"></select>
+          <div class="enc-tip" id="default-encoder-tip">Preselected whenever you open Compress or Convert. You can still change it per clip.</div>
+        </div>
+      </div>
+
+    </div>
+
+    <div id="settings-footer">
+      <span id="settings-hint">Saved automatically</span>
+      <button id="settings-reset">Reset</button>
+      <button id="settings-done">Done</button>
+    </div>
+  </div>
+</div>
+
 <!-- Progress -->
 <div id="progress-overlay">
   <div class="spinner"></div>
-  <div class="prog-title">Trimming…</div>
+  <div class="prog-title" id="prog-title">Trimming…</div>
   <div class="prog-sub" id="prog-sub">Running ffmpeg</div>
+  <div id="prog-bar-wrap"><div id="prog-bar"></div></div>
+  <button id="prog-cancel-btn">Cancel</button>
 </div>
 
 <div id="toast"></div>

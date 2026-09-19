@@ -83,6 +83,54 @@ npm run build-portable
    - **Replace original** → overwrites the original file in-place
 6. **Show in Explorer** opens the file's location in Windows Explorer
 
+Each card shows a **quality badge** in the corner of its thumbnail — `1080p60`, `720p`, `4K` and so on,
+named after the clip's short side so portrait clips read correctly too. Clips encoded with AV1 get an
+extra green **AV1** badge.
+
+---
+
+## Compressing a clip
+
+Open a card's **⋮** menu → **Compress…**. The modal shows the clip's current resolution, codec, bitrate
+and size, and gives you:
+
+- **Resolution** — keep the original or drop down the ladder to 1440p / 1080p / 720p / 480p (only rungs
+  below the source are offered; upscaling never saves space)
+- **Size control** — *Quality (CRF)* to target a look and let the size fall where it may, or
+  *Target bitrate* to land under a hard upload limit
+- **Framerate**, **audio** (keep / re-encode / strip) and **encoder speed**
+- **Encoder** — defaults to your GPU when one is usable, with CPU x264/x265 always selectable
+
+Every control carries a one-line note on what moving it actually does to the picture, and the footer
+shows a live **estimated output size** against the original. The estimate is a model, not a promise —
+real size depends on how much motion the clip has.
+
+## Converting AV1 → MP4
+
+**Convert to MP4…** only appears in the **⋮** menu for clips that are actually AV1 — for anything else it
+would be a lossy round-trip with nothing gained. It decodes the source and re-encodes it to **H.264 in an
+.mp4**, which every editor, player and upload target accepts. AV1 clips usually get *larger* — that is the
+cost of compatibility, and the modal says so up front.
+
+Both actions offer **Save as new** (writes `clip_720p.mp4` / `clip_h264.mp4` next to the original) and
+**Replace original** (keeps the original's name; if the container changes, the old file is removed).
+Long encodes show a progress bar with speed and time remaining, and can be cancelled — a cancelled run
+leaves nothing behind.
+
+---
+
+## Settings
+
+The **⚙** button in the titlebar opens Settings. Everything saves as you change it.
+
+| Setting | What it does |
+| --- | --- |
+| **Font size** | Scales every label, button and tip in the app, 80%–140%, with a live preview. Icons and window chrome stay fixed so nothing gets clipped. |
+| **Card size** | How wide a clip card gets before the grid wraps — Small / Medium / Large / Huge. Worth turning up on a big monitor. |
+| **Play preview on hover** | Turn off if scrolling a large folder feels heavy. |
+| **Thumbnail frame** | Which second of each clip to grab its still from. Bump it up if your clips open on a black intro or a loading screen. Changing it re-grabs the visible stills. |
+| **Default encoder** | Preselected whenever you open Compress or Convert. *Automatic* prefers your GPU when one is usable. You can still override it per clip. |
+
 ---
 
 ## Supported formats
@@ -95,3 +143,8 @@ Any format ffmpeg supports: `.mp4`, `.mov`, `.avi`, `.mkv`, `.webm`, `.wmv`, `.f
 
 - Trimming uses **stream copy** (`-c copy`) — it's near-instant and lossless. There may be slight inaccuracy at the cut points for non-keyframe boundaries (this is a fundamental video encoding constraint, not a bug).
 - No re-encoding means no quality loss and no waiting.
+- **Compress** and **Convert**, unlike trimming, do re-encode — they take real time and lose a little
+  quality by definition. Hardware encoding (NVENC / QuickSync / AMF) is typically 5–10× faster than CPU
+  x264 but produces somewhat larger files at the same quality setting.
+- Clipper probes for usable hardware encoders at startup by running a throwaway one-frame encode, so the
+  list only offers encoders this machine can actually use.

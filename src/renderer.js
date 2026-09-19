@@ -18,6 +18,7 @@ const cardMap     = new Map(); // fullPath → card element
 
 // ── Thumbnail cache & queue ───────────────────────────────────────────────────
 const thumbCache          = new Map(); // fullPath → data URL
+const metaCache           = new Map(); // fullPath → probed stream metadata
 const thumbQueue          = [];        // { fullPath, imgEl, cardEl, observer }
 let   activeExtractions   = 0;
 const MAX_THUMB_CONCURRENT = 4;
@@ -30,6 +31,13 @@ const hoverVid = (() => {
   v.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;pointer-events:none;display:none;z-index:5;';
   return v;
 })();
+
+function stopHoverPreview() {
+  hoverVid.pause();
+  hoverVid.style.display = 'none';
+  hoverVid.src = '';
+  if (hoverVid.parentNode) hoverVid.parentNode.removeChild(hoverVid);
+}
 
 // ── DOM ───────────────────────────────────────────────────────────────────────
 const rootFolderDisplay = document.getElementById('root-folder-display');
@@ -100,6 +108,58 @@ function fmtDate(ms) {
   return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+// ── Quality badges ────────────────────────────────────────────────────────────
+// Quality is named after the short side, so a 1080x1920 phone clip still reads "1080p".
+function qualityLabel(meta) {
+  if (!meta || !meta.width || !meta.height) return null;
+  const q = Math.min(meta.width, meta.height);
+  let label;
+  if (q >= 4320) label = '8K';
+  else if (q >= 2160) label = '4K';
+  else if (q >= 1440) label = '1440p';
+  else if (q >= 1080) label = '1080p';
+  else if (q >= 900)  label = '900p';
+  else if (q >= 720)  label = '720p';
+  else if (q >= 540)  label = '540p';
+  else if (q >= 480)  label = '480p';
+  else if (q >= 360)  label = '360p';
+  else label = q + 'p';
+  // High-framerate footage is worth calling out — "1080p60" is how people describe it.
+  if (meta.fps && meta.fps >= 50 && label.endsWith('p')) label += Math.round(meta.fps);
+  return label;
+}
+
+const CODEC_NAMES = { h264: 'H.264', hevc: 'H.265', av1: 'AV1', vp9: 'VP9', vp8: 'VP8', mpeg4: 'MPEG-4', wmv3: 'WMV', vc1: 'VC-1' };
+function codecLabel(codec) {
+  return CODEC_NAMES[codec] || (codec ? codec.toUpperCase() : '');
+}
+
+function applyBadges(cardEl, meta) {
+  const isAv1 = meta && meta.videoCodec === 'av1';
+
+  // Converting is only offered for AV1 — for anything else it would just be a
+  // lossy round-trip with nothing gained, so the entry stays hidden.
+  const convertItem = cardEl.querySelector('[data-action="convert"]');
+  if (convertItem) convertItem.style.display = isAv1 ? '' : 'none';
+
+  const wrap = cardEl.querySelector('.vid-badges');
+  if (!wrap) return;
+  const label = qualityLabel(meta);
+  if (!label) { wrap.innerHTML = ''; return; }
+
+  const short = Math.min(meta.width, meta.height);
+  const cls = short >= 1080 ? 'res-high' : short <= 480 ? 'res-low' : '';
+  let html = `<span class="q-badge ${cls}">${label}</span>`;
+  if (isAv1) html += '<span class="q-badge codec-av1">AV1</span>';
+  wrap.innerHTML = html;
+}
+
+function applyBadgesFor(fullPath) {
+  const card = cardMap.get(fullPath);
+  const meta = metaCache.get(fullPath);
+  if (card && meta) applyBadges(card, meta);
+}
+
 function showToast(msg, type = 'info', duration = 2800) {
   toast.textContent = msg;
   toast.className = 'show ' + type;
@@ -158,12 +218,29 @@ function drainThumbQueue() {
   }
 }
 
+// Re-arms lazy extraction for a card whose cached still was invalidated.
+function requeueThumb(fullPath, cardEl) {
+  const imgEl = cardEl.querySelector('.vid-thumb-img');
+  if (!imgEl) return;
+  const observer = new IntersectionObserver(entries => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) queueThumb(fullPath, imgEl, cardEl, observer);
+    });
+  });
+  observer.observe(cardEl);
+}
+
 async function extractThumb(fullPath, imgEl) {
   if (thumbCache.has(fullPath)) { if (imgEl.isConnected) imgEl.src = thumbCache.get(fullPath); return; }
-  const url = await api.getThumbnail(fullPath, 3);
-  if (url) {
-    thumbCache.set(fullPath, url);
-    if (imgEl.isConnected) imgEl.src = url;
+  // One ffmpeg pass yields both the poster frame and the stream metadata behind the badge.
+  const res = await api.getThumbnail(fullPath, settings.thumbTime);
+  if (res && res.meta) {
+    metaCache.set(fullPath, res.meta);
+    applyBadgesFor(fullPath);
+  }
+  if (res && res.dataUrl) {
+    thumbCache.set(fullPath, res.dataUrl);
+    if (imgEl.isConnected) imgEl.src = res.dataUrl;
   }
 }
 
@@ -317,6 +394,15 @@ function makeCard(v) {
       Show in Explorer
     </div>
     <div class="vid-dropdown-sep"></div>
+    <div class="vid-dropdown-item" data-action="compress">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 1.5h10M1 10.5h10M6 3.5v5M4 5.5L6 3.5l2 2M4 6.5L6 8.5l2-2"/></svg>
+      Compress…
+    </div>
+    <div class="vid-dropdown-item" data-action="convert" style="display:none">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5h7L7 2.5M10 7.5H3l2 2"/></svg>
+      Convert to MP4…
+    </div>
+    <div class="vid-dropdown-sep"></div>
     <div class="vid-dropdown-item danger" data-action="delete">
       <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 3h8M5 3V2h2v1M5 5v4M7 5v4M3 3l.5 7h5l.5-7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
       Delete file
@@ -327,6 +413,10 @@ function makeCard(v) {
     closeOpenDropdown();
     if (action === 'explorer') {
       api.openInExplorer(v.fullPath);
+    } else if (action === 'compress') {
+      openEncodeModal(v, 'compress');
+    } else if (action === 'convert') {
+      openEncodeModal(v, 'convert');
     } else if (action === 'delete') {
       if (!confirm(`Delete "${v.name}"?\n\nThis cannot be undone.`)) return;
       api.watchFolder('');
@@ -349,6 +439,7 @@ function makeCard(v) {
   card.innerHTML = `
     <div class="vid-thumb">
       <img class="vid-thumb-img" alt="" />
+      <div class="vid-badges"></div>
       <div class="thumb-overlay">
         <div class="play-circle">
           <svg width="13" height="14" viewBox="0 0 13 14" fill="#0a0a0b"><path d="M0 0L13 7L0 14V0Z"/></svg>
@@ -372,6 +463,7 @@ function makeCard(v) {
   card.appendChild(dropdown);
 
   const thumbImg = card.querySelector('.vid-thumb-img');
+  if (metaCache.has(v.fullPath)) applyBadges(card, metaCache.get(v.fullPath));
 
   // Keep observing until extraction succeeds — scroll-away dequeues stale items,
   // scroll-back re-queues with priority (unshift). Observer is disconnected after extraction.
@@ -385,6 +477,7 @@ function makeCard(v) {
   // Hover play preview — reuses single shared hoverVid element
   const thumbEl = card.querySelector('.vid-thumb');
   thumbEl.addEventListener('mouseenter', () => {
+    if (!settings.hoverPreview) return;
     if (modalOverlay.classList.contains('open')) return;
     thumbEl.appendChild(hoverVid);
     hoverVid.style.display = '';
@@ -392,12 +485,7 @@ function makeCard(v) {
     hoverVid.currentTime = 0;
     hoverVid.play().catch(() => {});
   });
-  thumbEl.addEventListener('mouseleave', () => {
-    hoverVid.pause();
-    hoverVid.style.display = 'none';
-    hoverVid.src = '';
-    if (hoverVid.parentNode) hoverVid.parentNode.removeChild(hoverVid);
-  });
+  thumbEl.addEventListener('mouseleave', stopHoverPreview);
 
   // Click card body = open modal
   card.querySelector('.vid-card-body').addEventListener('click', () => openModal(v));
@@ -424,11 +512,7 @@ function openModal(clip) {
   previewVideo.load();
   previewVideo.addEventListener('loadedmetadata', onVideoLoaded, { once: true });
 
-  // Stop any active hover preview
-  hoverVid.pause();
-  hoverVid.style.display = 'none';
-  hoverVid.src = '';
-  if (hoverVid.parentNode) hoverVid.parentNode.removeChild(hoverVid);
+  stopHoverPreview();
 
   updateNavButtons();
   modalOverlay.classList.add('open');
@@ -668,6 +752,8 @@ window.addEventListener('resize', updateTimelineUI);
 // ── Init ──────────────────────────────────────────────────────────────────────
 setTimeout(async () => {
   const prefs = await api.loadPrefs();
+  if (prefs?.settings) settings = { ...SETTINGS_DEFAULTS, ...prefs.settings };
+  applySettings();
   if (prefs?.volume != null) applyVolume(prefs.volume, prefs.muted ?? false);
   if (prefs?.lastFolder) {
     rootFolder = prefs.lastFolder;
@@ -677,3 +763,615 @@ setTimeout(async () => {
     gridEmpty.classList.add('show');
   }
 }, 0);
+// ── Encode modal (compress / convert) ─────────────────────────────────────────
+const encodeOverlay   = document.getElementById('encode-overlay');
+const encodeTitle     = document.getElementById('encode-title');
+const encodeSubject   = document.getElementById('encode-subject');
+const encodeCloseBtn  = document.getElementById('encode-close-btn');
+const encodeNote      = document.getElementById('encode-note');
+const srcRes          = document.getElementById('src-res');
+const srcCodec        = document.getElementById('src-codec');
+const srcBitrate      = document.getElementById('src-bitrate');
+const srcSize         = document.getElementById('src-size');
+const resSeg          = document.getElementById('res-seg');
+const rateSeg         = document.getElementById('rate-seg');
+const crfField        = document.getElementById('crf-field');
+const crfSlider       = document.getElementById('crf-slider');
+const crfValue        = document.getElementById('crf-value');
+const crfTip          = document.getElementById('crf-tip');
+const bitrateField    = document.getElementById('bitrate-field');
+const bitrateInput    = document.getElementById('bitrate-input');
+const fpsSelect       = document.getElementById('fps-select');
+const audioSelect     = document.getElementById('audio-select');
+const encoderSelect   = document.getElementById('encoder-select');
+const encoderTip      = document.getElementById('encoder-tip');
+const speedSlider     = document.getElementById('speed-slider');
+const speedValue      = document.getElementById('speed-value');
+const estSize         = document.getElementById('est-size');
+const estDelta        = document.getElementById('est-delta');
+const encodeSaveNew   = document.getElementById('encode-save-new');
+const encodeReplace   = document.getElementById('encode-replace');
+const progTitle       = document.getElementById('prog-title');
+const progBarWrap     = document.getElementById('prog-bar-wrap');
+const progBar         = document.getElementById('prog-bar');
+const progCancelBtn   = document.getElementById('prog-cancel-btn');
+
+let encodeClip   = null;   // the clip the modal is acting on
+let encodeMeta   = null;   // its probed stream metadata
+let encodeKind   = 'compress';
+let encoderList  = null;   // { software: [...], hardware: [...] } — probed once
+
+const RES_LADDER = [1440, 1080, 720, 480];
+const SPEED_NAMES = ['Ultra fast', 'Super fast', 'Very fast', 'Faster', 'Fast', 'Medium', 'Slow', 'Slower'];
+
+let encoderTouched = false;  // once the user picks an encoder, stop re-defaulting it
+
+const enc = {
+  targetHeight: null,
+  rateMode: 'crf',
+  crf: 23,
+  bitrateKbps: 4000,
+  fps: null,
+  audio: 'copy',
+  encoder: 'libx264',
+  speed: 5,
+};
+
+// ── Quality descriptors ───────────────────────────────────────────────────────
+function crfDescriptor(crf) {
+  if (crf <= 18) return 'Visually lossless';
+  if (crf <= 21) return 'Excellent';
+  if (crf <= 24) return 'Good';
+  if (crf <= 27) return 'Fair';
+  if (crf <= 30) return 'Noticeably soft';
+  return 'Low — visible blocking';
+}
+
+function crfTipText(crf, family) {
+  const scaleNote = family === 'hevc'
+    ? ' On H.265 the scale runs a few points higher than H.264 — CRF 28 here looks about like CRF 23 there.'
+    : '';
+  if (crf <= 18) return 'Barely distinguishable from the source. Files stay large — often close to the original.' + scaleNote;
+  if (crf <= 21) return 'Sharp enough that differences are hard to spot in motion. A safe choice for footage you might edit later.' + scaleNote;
+  if (crf <= 24) return 'The usual sweet spot. Roughly half the size of the original with no obvious loss at normal viewing distance.' + scaleNote;
+  if (crf <= 27) return 'Clearly smaller. Fine for sharing and watching; fast motion and fine textures start to smear.' + scaleNote;
+  if (crf <= 30) return 'Small files, but softness and banding are visible — especially in dark scenes and smoke.' + scaleNote;
+  return 'Aggressive. Expect blocking in any busy scene. Use only when size matters more than looks.' + scaleNote;
+}
+
+function encoderFamily(id) {
+  return id.startsWith('hevc') || id === 'libx265' ? 'hevc' : 'h264';
+}
+function isHardware(id) {
+  return /_(nvenc|qsv|amf)$/.test(id);
+}
+
+function encoderTipText(id) {
+  const hw = isHardware(id);
+  const fam = encoderFamily(id);
+  if (hw && fam === 'h264') return 'Runs on the GPU — typically 5–10× faster than the CPU. Files land somewhat larger at the same quality setting.';
+  if (hw) return 'GPU H.265 — fast and compact, but some editors and older devices will not open it.';
+  if (fam === 'hevc') return 'About 30–40% smaller than H.264 at matched quality, but slow to encode and less widely supported.';
+  return 'Best size-for-quality and plays literally everywhere. Slowest option — roughly real-time on long clips.';
+}
+
+// ── Estimation ────────────────────────────────────────────────────────────────
+// Bits-per-pixel model anchored on a reference CRF per codec family. It is a
+// ballpark, not a promise — actual size swings with how much motion is in the clip.
+const BPP_REF = {
+  h264: { crf: 23, bpp: 0.085 },
+  hevc: { crf: 28, bpp: 0.051 },
+};
+
+function outputDims() {
+  const w = encodeMeta?.width, h = encodeMeta?.height;
+  if (!w || !h) return null;
+  if (!enc.targetHeight) return { w, h };
+  // Portrait clips are scaled on their short side, matching what ffmpeg is told to do.
+  const portrait = w < h;
+  if (portrait) {
+    const nw = enc.targetHeight;
+    return { w: nw, h: Math.round((h / w) * nw / 2) * 2 };
+  }
+  const nh = enc.targetHeight;
+  return { w: Math.round((w / h) * nh / 2) * 2, h: nh };
+}
+
+function audioKbps() {
+  if (enc.audio === 'none') return 0;
+  if (enc.audio === 'copy') return encodeMeta?.hasAudio ? (encodeMeta.audioKbps || 160) : 0;
+  return parseInt(enc.audio);
+}
+
+function estimateVideoKbps() {
+  const dims = outputDims();
+  if (!dims) return null;
+  const fps = enc.fps || encodeMeta?.fps || 30;
+
+  if (enc.rateMode === 'bitrate') return enc.bitrateKbps;
+
+  const fam = encoderFamily(enc.encoder);
+  const ref = BPP_REF[fam];
+  let bpp = ref.bpp * Math.pow(1.13, ref.crf - enc.crf);
+  if (isHardware(enc.encoder)) bpp *= 1.25; // fixed-function encoders spend more bits for the same look
+
+  let kbps = (dims.w * dims.h * fps * bpp) / 1000;
+
+  // A re-encode almost never needs more bits than the source did for the same pixel rate,
+  // so cap the model against what the original actually used.
+  const srcKbps = encodeMeta?.videoKbps;
+  if (srcKbps && encodeMeta.width && encodeMeta.height) {
+    const srcFps = encodeMeta.fps || fps;
+    const ratio = (dims.w * dims.h * fps) / (encodeMeta.width * encodeMeta.height * srcFps);
+    kbps = Math.min(kbps, srcKbps * ratio * 1.1);
+  }
+  return Math.max(80, kbps);
+}
+
+function updateEstimate() {
+  const dur = encodeMeta?.durationSec;
+  const vk = estimateVideoKbps();
+  if (!dur || vk == null) { estSize.textContent = '—'; estDelta.textContent = ''; return; }
+
+  const bytes = ((vk + audioKbps()) * 1000 / 8) * dur;
+  estSize.textContent = '≈ ' + fmtBytes(bytes);
+
+  const orig = encodeClip?.size;
+  if (orig) {
+    const pct = Math.round((bytes / orig) * 100);
+    const grew = bytes > orig;
+    estDelta.textContent = grew
+      ? `${pct}% of original — larger`
+      : `${pct}% of original — saves ${fmtBytes(orig - bytes)}`;
+    estDelta.classList.toggle('grow', grew);
+  } else {
+    estDelta.textContent = '';
+  }
+}
+
+// ── Modal population ──────────────────────────────────────────────────────────
+function buildResSegment() {
+  const srcShort = encodeMeta?.width && encodeMeta?.height
+    ? Math.min(encodeMeta.width, encodeMeta.height) : null;
+
+  resSeg.innerHTML = '';
+  const opts = [{ h: null, label: 'Keep original' }];
+  RES_LADDER.forEach(h => {
+    // Upscaling is never a compression win, so only offer rungs below the source.
+    if (!srcShort || h < srcShort) opts.push({ h, label: h + 'p' });
+  });
+
+  opts.forEach(o => {
+    const b = document.createElement('button');
+    b.textContent = o.label;
+    b.classList.toggle('active', o.h === enc.targetHeight);
+    b.addEventListener('click', () => {
+      enc.targetHeight = o.h;
+      [...resSeg.children].forEach(c => c.classList.remove('active'));
+      b.classList.add('active');
+      syncBitrateDefault();
+      updateEstimate();
+    });
+    resSeg.appendChild(b);
+  });
+}
+
+function availableEncoders() {
+  const hw = encoderList?.hardware ?? [];
+  const sw = encoderList?.software ?? [{ id: 'libx264', family: 'h264', vendor: 'CPU (x264)' }];
+  const all = [...hw, ...sw];
+  // Convert exists to produce H.264 — offering H.265 here would defeat the point.
+  return encodeKind === 'convert' ? all.filter(e => e.family === 'h264') : all;
+}
+
+function buildEncoderSelect() {
+  const list = availableEncoders();
+  encoderSelect.innerHTML = '';
+  list.forEach(e => {
+    const o = document.createElement('option');
+    o.value = e.id;
+    o.textContent = `${e.vendor} · ${e.family === 'hevc' ? 'H.265' : 'H.264'}` + (isHardware(e.id) ? ' (fast)' : '');
+    encoderSelect.appendChild(o);
+  });
+
+  // Honour the Settings default when it is usable here, else prefer a hardware
+  // H.264 encoder, else whatever is left — until the user overrides per clip.
+  if (!encoderTouched || !list.some(e => e.id === enc.encoder)) {
+    const fromSettings = list.find(e => e.id === settings.defaultEncoder);
+    const preferred = fromSettings || list.find(e => e.family === 'h264' && isHardware(e.id)) || list[0];
+    enc.encoder = preferred.id;
+  }
+  encoderSelect.value = enc.encoder;
+  encoderTip.textContent = encoderTipText(enc.encoder);
+}
+
+function syncBitrateDefault() {
+  // Keep the manual bitrate box tracking the CRF model so switching modes is not a cliff.
+  if (enc.rateMode === 'crf') {
+    const modelled = estimateVideoKbps();
+    if (modelled) {
+      enc.bitrateKbps = Math.round(modelled / 100) * 100;
+      bitrateInput.value = enc.bitrateKbps;
+    }
+  }
+}
+
+function refreshQualityUi() {
+  const fam = encoderFamily(enc.encoder);
+  crfValue.textContent = `CRF ${enc.crf} · ${crfDescriptor(enc.crf)}`;
+  crfTip.textContent = crfTipText(enc.crf, fam);
+  speedValue.textContent = SPEED_NAMES[enc.speed] || 'Medium';
+}
+
+function setEncodeNote(html) {
+  encodeNote.innerHTML = html || '';
+  encodeNote.classList.toggle('show', !!html);
+}
+
+function fillSourceCells() {
+  const m = encodeMeta;
+  srcRes.textContent = m?.width
+    ? `${m.width}×${m.height}${m.fps ? ' · ' + Math.round(m.fps) + 'fps' : ''}`
+    : '—';
+  srcCodec.textContent = m?.videoCodec ? codecLabel(m.videoCodec) : '—';
+  srcBitrate.textContent = m?.videoKbps ? Math.round(m.videoKbps).toLocaleString() + ' kbps' : '—';
+  srcSize.textContent = encodeClip ? fmtBytes(encodeClip.size) : '—';
+}
+
+async function openEncodeModal(clip, kind) {
+  encodeClip = clip;
+  encodeKind = kind;
+  encodeMeta = metaCache.get(clip.fullPath) || null;
+
+  encodeTitle.textContent = kind === 'convert' ? 'Convert to MP4' : 'Compress';
+  encodeSubject.textContent = clip.name;
+  encodeOverlay.classList.add('open');
+
+  // Show what we already know, then fill in the rest once the probe lands.
+  fillSourceCells();
+  setEncodeNote('');
+  estSize.textContent = '…';
+  estDelta.textContent = '';
+
+  if (!encoderList) encoderList = await api.getEncoders();
+  if (!encodeMeta) {
+    const m = await api.probeVideo(clip.fullPath);
+    if (m) { encodeMeta = m; metaCache.set(clip.fullPath, m); applyBadgesFor(clip.fullPath); }
+  }
+  if (encodeClip !== clip) return; // modal was closed or retargeted while probing
+
+  applyKindDefaults();
+  fillSourceCells();
+  buildResSegment();
+  buildEncoderSelect();
+  refreshQualityUi();
+  syncBitrateDefault();
+  updateEstimate();
+}
+
+function applyKindDefaults() {
+  const m = encodeMeta;
+  const srcShort = m?.width && m?.height ? Math.min(m.width, m.height) : null;
+
+  enc.rateMode = 'crf';
+  enc.fps = null;
+  enc.audio = 'copy';
+  enc.speed = 5;
+  [...rateSeg.children].forEach(b => b.classList.toggle('active', b.dataset.rate === 'crf'));
+  crfField.style.display = '';
+  bitrateField.style.display = 'none';
+  fpsSelect.value = '';
+  audioSelect.value = 'copy';
+  speedSlider.value = 5;
+
+  if (encodeKind === 'convert') {
+    // Conversion is about playability, not shrinking — keep the picture as-is and
+    // pin the output to H.264 so the result opens in anything.
+    enc.targetHeight = null;
+    enc.crf = 20;
+
+    const codec = m?.videoCodec ? codecLabel(m.videoCodec) : 'this codec';
+    if (m?.videoCodec === 'av1') {
+      setEncodeNote(`This clip is <strong>AV1</strong>. It will be decoded and re-encoded to <strong>H.264 in an .mp4</strong>, which every editor, player and upload target accepts. Expect a somewhat <em>larger</em> file than the AV1 original — that is the cost of compatibility.`);
+    } else {
+      setEncodeNote(`This clip is <strong>${codec}</strong>. It will be re-encoded to <strong>H.264 in an .mp4</strong> for maximum compatibility.`);
+    }
+  } else {
+    // Compress opens one rung below the source so the default already does something.
+    enc.targetHeight = srcShort ? (RES_LADDER.find(h => h < srcShort) ?? null) : null;
+    enc.crf = 23;
+    setEncodeNote('');
+  }
+  crfSlider.value = enc.crf;
+}
+
+function closeEncodeModal() {
+  encodeOverlay.classList.remove('open');
+  encodeClip = null;
+  encodeMeta = null;
+}
+
+// ── Modal wiring ──────────────────────────────────────────────────────────────
+encodeCloseBtn.addEventListener('click', closeEncodeModal);
+encodeOverlay.addEventListener('click', e => { if (e.target === encodeOverlay) closeEncodeModal(); });
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && encodeOverlay.classList.contains('open')) closeEncodeModal();
+});
+
+rateSeg.addEventListener('click', e => {
+  const btn = e.target.closest('[data-rate]');
+  if (!btn) return;
+  syncBitrateDefault();               // carry the CRF estimate over before switching
+  enc.rateMode = btn.dataset.rate;
+  [...rateSeg.children].forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  crfField.style.display     = enc.rateMode === 'crf' ? '' : 'none';
+  bitrateField.style.display = enc.rateMode === 'crf' ? 'none' : '';
+  updateEstimate();
+});
+
+crfSlider.addEventListener('input', () => {
+  enc.crf = parseInt(crfSlider.value);
+  refreshQualityUi();
+  updateEstimate();
+});
+
+bitrateInput.addEventListener('input', () => {
+  const v = parseInt(bitrateInput.value);
+  enc.bitrateKbps = isNaN(v) ? 4000 : Math.max(100, v);
+  updateEstimate();
+});
+
+fpsSelect.addEventListener('change', () => {
+  enc.fps = fpsSelect.value ? parseInt(fpsSelect.value) : null;
+  updateEstimate();
+});
+
+audioSelect.addEventListener('change', () => {
+  enc.audio = audioSelect.value;
+  updateEstimate();
+});
+
+encoderSelect.addEventListener('change', () => {
+  enc.encoder = encoderSelect.value;
+  encoderTouched = true;
+  encoderTip.textContent = encoderTipText(enc.encoder);
+  refreshQualityUi();
+  updateEstimate();
+});
+
+speedSlider.addEventListener('input', () => {
+  enc.speed = parseInt(speedSlider.value);
+  refreshQualityUi();
+});
+
+encodeSaveNew.addEventListener('click', () => runEncodeJob('new'));
+encodeReplace.addEventListener('click', () => {
+  const outExt = '.mp4';
+  const srcExt = (encodeClip?.name.match(/\.[^.]+$/) || [''])[0].toLowerCase();
+  const extNote = srcExt && srcExt !== outExt
+    ? `\n\nThe original is a ${srcExt} file — it will be deleted and replaced by an .mp4 with the same name.`
+    : '';
+  if (!confirm(`Replace "${encodeClip?.name}" with the re-encoded version?${extNote}\n\nThis cannot be undone.`)) return;
+  runEncodeJob('replace');
+});
+
+// ── Running the job ───────────────────────────────────────────────────────────
+function encodeSuffix() {
+  if (encodeKind === 'convert') return '_h264';
+  const dims = outputDims();
+  return dims ? '_' + Math.min(dims.w, dims.h) + 'p' : '_compressed';
+}
+
+async function runEncodeJob(saveMode) {
+  if (!encodeClip) return;
+  const clip = encodeClip;
+  const kind = encodeKind;
+  const suffix = encodeSuffix();   // depends on encodeMeta, which closing the modal clears
+
+  closeEncodeModal();
+  api.watchFolder('');
+
+  progTitle.textContent = kind === 'convert' ? 'Converting…' : 'Compressing…';
+  progSub.textContent = 'Starting ffmpeg';
+  progBar.style.width = '0%';
+  progBarWrap.classList.add('show');
+  progCancelBtn.classList.add('show');
+  progressOverlay.classList.add('show');
+
+  const result = await api.encodeVideo({
+    inputPath: clip.fullPath,
+    saveMode,
+    suffix,
+    container: 'mp4',
+    encoder: enc.encoder,
+    speed: enc.speed,
+    rateMode: enc.rateMode,
+    crf: enc.crf,
+    bitrateKbps: enc.bitrateKbps,
+    targetHeight: enc.targetHeight,
+    targetFps: enc.fps,
+    audioMode: enc.audio === 'none' ? 'none' : enc.audio === 'copy' ? 'copy' : 'encode',
+    audioKbps: enc.audio === 'copy' || enc.audio === 'none' ? 160 : parseInt(enc.audio),
+  });
+
+  progressOverlay.classList.remove('show');
+  progBarWrap.classList.remove('show');
+  progCancelBtn.classList.remove('show');
+  progTitle.textContent = 'Trimming…';
+
+  if (result.cancelled) {
+    startWatching(rootFolder);
+    showToast('Encode cancelled', 'info');
+    return;
+  }
+
+  if (result.success) {
+    // Both caches key on path; a replace reuses the path with entirely new content.
+    thumbCache.delete(clip.fullPath);
+    metaCache.delete(clip.fullPath);
+    const saved = clip.size - result.size;
+    const pct = Math.round((result.size / clip.size) * 100);
+    showToast(
+      `✓ ${result.outputPath.split('\\').pop()} — ${fmtBytes(result.size)} (${pct}% of original${saved > 0 ? ', saved ' + fmtBytes(saved) : ''})`,
+      'success', 5000);
+    await scanAndRender();
+  } else {
+    startWatching(rootFolder);
+    showToast('Encode failed: ' + (result.details || result.error), 'error', 6000);
+  }
+}
+
+progCancelBtn.addEventListener('click', () => {
+  progSub.textContent = 'Cancelling…';
+  api.cancelEncode();
+});
+
+api.onEncodeProgress(p => {
+  if (p.percent != null) progBar.style.width = p.percent.toFixed(1) + '%';
+  const bits = [];
+  if (p.percent != null) bits.push(p.percent.toFixed(0) + '%');
+  if (p.speed) {
+    bits.push(p.speed.toFixed(1) + '×');
+    if (p.totalSec && p.timeSec != null) {
+      const remain = (p.totalSec - p.timeSec) / p.speed;
+      if (remain > 0 && isFinite(remain)) bits.push(fmt(remain) + ' left');
+    }
+  }
+  progSub.textContent = bits.length ? bits.join('  ·  ') : 'Running ffmpeg';
+});
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+const settingsBtn       = document.getElementById('settings-btn');
+const settingsOverlay   = document.getElementById('settings-overlay');
+const settingsCloseBtn  = document.getElementById('settings-close-btn');
+const settingsDoneBtn   = document.getElementById('settings-done');
+const settingsResetBtn  = document.getElementById('settings-reset');
+const fontsizeSlider    = document.getElementById('fontsize-slider');
+const fontsizeValue     = document.getElementById('fontsize-value');
+const cardsizeSeg       = document.getElementById('cardsize-seg');
+const hoverpreviewRow   = document.getElementById('hoverpreview-row');
+const hoverpreviewSwitch= document.getElementById('hoverpreview-switch');
+const thumbtimeSlider   = document.getElementById('thumbtime-slider');
+const thumbtimeValue    = document.getElementById('thumbtime-value');
+const defaultEncoderSel = document.getElementById('default-encoder-select');
+
+const SETTINGS_DEFAULTS = {
+  fontScale: 100,      // percent
+  cardMin: 280,        // px, grid column floor
+  hoverPreview: true,
+  thumbTime: 3,        // seconds into the clip
+  defaultEncoder: '',  // '' = pick the best available automatically
+};
+
+let settings = { ...SETTINGS_DEFAULTS };
+
+// Applies settings to the DOM. Everything here is idempotent so it can run on
+// load, on every slider tick, and after a reset.
+function applySettings() {
+  document.documentElement.style.setProperty('--font-scale', settings.fontScale / 100);
+  document.documentElement.style.setProperty('--card-min', settings.cardMin + 'px');
+
+  fontsizeSlider.value = settings.fontScale;
+  fontsizeValue.textContent = settings.fontScale + '%';
+  thumbtimeSlider.value = settings.thumbTime;
+  thumbtimeValue.textContent = settings.thumbTime + 's';
+  hoverpreviewSwitch.classList.toggle('on', settings.hoverPreview);
+  [...cardsizeSeg.children].forEach(b =>
+    b.classList.toggle('active', parseInt(b.dataset.min) === settings.cardMin));
+}
+
+function persistSettings() {
+  api.savePrefs({ settings });
+}
+
+async function openSettings() {
+  settingsOverlay.classList.add('open');
+  // The probe is lazy, so Settings may be the first thing that needs it.
+  if (!encoderList) encoderList = await api.getEncoders();
+  buildDefaultEncoderSelect();
+}
+function closeSettings() {
+  settingsOverlay.classList.remove('open');
+}
+
+settingsBtn.addEventListener('click', openSettings);
+settingsCloseBtn.addEventListener('click', closeSettings);
+settingsDoneBtn.addEventListener('click', closeSettings);
+settingsOverlay.addEventListener('click', e => { if (e.target === settingsOverlay) closeSettings(); });
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && settingsOverlay.classList.contains('open')) closeSettings();
+});
+
+fontsizeSlider.addEventListener('input', () => {
+  settings.fontScale = parseInt(fontsizeSlider.value);
+  applySettings();
+  persistSettings();
+});
+
+cardsizeSeg.addEventListener('click', e => {
+  const btn = e.target.closest('[data-min]');
+  if (!btn) return;
+  settings.cardMin = parseInt(btn.dataset.min);
+  applySettings();
+  persistSettings();
+});
+
+hoverpreviewRow.addEventListener('click', () => {
+  settings.hoverPreview = !settings.hoverPreview;
+  // Kill any preview already playing so toggling off takes effect immediately.
+  if (!settings.hoverPreview) stopHoverPreview();
+  applySettings();
+  persistSettings();
+});
+
+thumbtimeSlider.addEventListener('input', () => {
+  settings.thumbTime = parseInt(thumbtimeSlider.value);
+  applySettings();
+});
+thumbtimeSlider.addEventListener('change', () => {
+  // Re-grab every still only once the user lets go of the slider.
+  thumbCache.clear();
+  cardMap.forEach((card, fullPath) => {
+    const img = card.querySelector('.vid-thumb-img');
+    if (img) img.removeAttribute('src');
+    requeueThumb(fullPath, card);
+  });
+  persistSettings();
+});
+
+function buildDefaultEncoderSelect() {
+  const hw = encoderList?.hardware ?? [];
+  const sw = encoderList?.software ?? [{ id: 'libx264', family: 'h264', vendor: 'CPU (x264)' }];
+  defaultEncoderSel.innerHTML = '';
+
+  const auto = document.createElement('option');
+  auto.value = '';
+  auto.textContent = hw.length ? 'Automatic — use GPU when available' : 'Automatic — CPU (no GPU encoder found)';
+  defaultEncoderSel.appendChild(auto);
+
+  [...hw, ...sw].forEach(e => {
+    const o = document.createElement('option');
+    o.value = e.id;
+    o.textContent = `${e.vendor} · ${e.family === 'hevc' ? 'H.265' : 'H.264'}` + (isHardware(e.id) ? ' (fast)' : '');
+    defaultEncoderSel.appendChild(o);
+  });
+  defaultEncoderSel.value = settings.defaultEncoder;
+}
+
+defaultEncoderSel.addEventListener('change', () => {
+  settings.defaultEncoder = defaultEncoderSel.value;
+  encoderTouched = false;   // let the new default take effect next time a modal opens
+  persistSettings();
+});
+
+settingsResetBtn.addEventListener('click', () => {
+  settings = { ...SETTINGS_DEFAULTS };
+  applySettings();
+  buildDefaultEncoderSelect();
+  encoderTouched = false;
+  persistSettings();
+  showToast('Settings reset to defaults', 'info');
+});
+
+applySettings();

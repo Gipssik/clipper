@@ -395,6 +395,11 @@ function makeCard(v) {
   const dropdown = document.createElement('div');
   dropdown.className = 'vid-dropdown';
   dropdown.innerHTML = `
+    <div class="vid-dropdown-item" data-action="export">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8V1.5M6 1.5L3.8 3.7M6 1.5l2.2 2.2M1.5 7.5v2a1 1 0 001 1h7a1 1 0 001-1v-2"/></svg>
+      <span class="export-label">${exportMenuLabel()}</span>
+    </div>
+    <div class="vid-dropdown-sep"></div>
     <div class="vid-dropdown-item" data-action="explorer">
       <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><rect x="1" y="1" width="4.5" height="4.5" rx="1" stroke="currentColor" stroke-width="1.2"/><rect x="6.5" y="1" width="4.5" height="4.5" rx="1" stroke="currentColor" stroke-width="1.2"/><rect x="1" y="6.5" width="4.5" height="4.5" rx="1" stroke="currentColor" stroke-width="1.2"/><rect x="6.5" y="6.5" width="4.5" height="4.5" rx="1" stroke="currentColor" stroke-width="1.2"/></svg>
       Show in Explorer
@@ -421,7 +426,9 @@ function makeCard(v) {
   dropdown.addEventListener('click', async e => {
     const action = e.target.closest('[data-action]')?.dataset.action;
     closeOpenDropdown();
-    if (action === 'explorer') {
+    if (action === 'export') {
+      startExport(v);
+    } else if (action === 'explorer') {
       api.openInExplorer(v.fullPath);
     } else if (action === 'compress') {
       openEncodeModal(v, 'compress');
@@ -848,6 +855,8 @@ function crfDescriptor(crf) {
 function crfTipText(crf, family) {
   const scaleNote = family === 'hevc'
     ? ' On H.265 the scale runs a few points higher than H.264 — CRF 28 here looks about like CRF 23 there.'
+    : family === 'av1'
+    ? ' On AV1 the scale runs higher still — CRF 30 here looks about like CRF 23 on H.264.'
     : '';
   if (crf <= 18) return 'Barely distinguishable from the source. Files stay large — often close to the original.' + scaleNote;
   if (crf <= 21) return 'Sharp enough that differences are hard to spot in motion. A safe choice for footage you might edit later.' + scaleNote;
@@ -864,16 +873,20 @@ const TONEMAP_NAMES = {
   punchy:   'Punchy',
 };
 
+const TONEMAP_LOOK_TIPS = {
+  balanced: 'Holds midtone brightness close to the original and only rolls off the top highlights — the closest match to how the game actually looked. Start here.',
+  filmic:   'Filmic S-curve that protects detail in skies, explosions and muzzle flashes. It darkens the whole picture though, so dark scenes can come out murky.',
+  punchy:   'Leaves everything below SDR white exactly as graded and hard-clips above it. Most contrast, but the brightest highlights lose all detail.',
+};
+
 function tonemapTipText(op, hdrFormat) {
   const curve = hdrFormat === 'hlg' ? 'HLG' : 'HDR10 (PQ)';
   if (!op) {
     return `The clip stays ${curve}. It will look right on an HDR display and washed-out, grey `
          + `and flat on everything else — which is what happens when you send it to someone.`;
   }
-  const lead = `Remaps the ${curve} picture into normal SDR colour so it looks the same everywhere. `;
-  if (op === 'filmic') return lead + 'Filmic S-curve that protects detail in skies, explosions and muzzle flashes. It darkens the whole picture though, so dark scenes can come out murky.';
-  if (op === 'punchy') return lead + 'Leaves everything below SDR white exactly as graded and hard-clips above it. Most contrast, but the brightest highlights lose all detail.';
-  return lead + 'Holds midtone brightness close to the original and only rolls off the top highlights — the closest match to how the game actually looked. Start here.';
+  return `Remaps the ${curve} picture into normal SDR colour so it looks the same everywhere. `
+       + TONEMAP_LOOK_TIPS[op];
 }
 
 function refreshToneMapUi() {
@@ -896,7 +909,10 @@ function refreshToneMapUi() {
     : 'This ffmpeg build has no zscale filter, so it cannot tone map. Drop a full ffmpeg build into ffmpeg-bin/ to enable it.';
 }
 
+const FAMILY_NAMES = { h264: 'H.264', hevc: 'H.265', av1: 'AV1' };
+
 function encoderFamily(id) {
+  if (id === 'libsvtav1' || id.startsWith('av1')) return 'av1';
   return id.startsWith('hevc') || id === 'libx265' ? 'hevc' : 'h264';
 }
 function isHardware(id) {
@@ -907,7 +923,9 @@ function encoderTipText(id) {
   const hw = isHardware(id);
   const fam = encoderFamily(id);
   if (hw && fam === 'h264') return 'Runs on the GPU — typically 5–10× faster than the CPU. Files land somewhat larger at the same quality setting.';
+  if (hw && fam === 'av1')  return 'GPU AV1 — the smallest files of the three and still fast, but only recent players, browsers and editors open it.';
   if (hw) return 'GPU H.265 — fast and compact, but some editors and older devices will not open it.';
+  if (fam === 'av1')  return 'Smallest files at matched quality, and royalty-free. Slow on the CPU and the least widely supported — use the GPU encoder if you have one.';
   if (fam === 'hevc') return 'About 30–40% smaller than H.264 at matched quality, but slow to encode and less widely supported.';
   return 'Best size-for-quality and plays literally everywhere. Slowest option — roughly real-time on long clips.';
 }
@@ -918,6 +936,7 @@ function encoderTipText(id) {
 const BPP_REF = {
   h264: { crf: 23, bpp: 0.085 },
   hevc: { crf: 28, bpp: 0.051 },
+  av1:  { crf: 30, bpp: 0.045 },
 };
 
 function outputDims() {
@@ -1028,7 +1047,7 @@ function buildEncoderSelect() {
   list.forEach(e => {
     const o = document.createElement('option');
     o.value = e.id;
-    o.textContent = `${e.vendor} · ${e.family === 'hevc' ? 'H.265' : 'H.264'}` + (isHardware(e.id) ? ' (fast)' : '');
+    o.textContent = `${e.vendor} · ${FAMILY_NAMES[e.family] || e.family}` + (isHardware(e.id) ? ' (fast)' : '');
     encoderSelect.appendChild(o);
   });
 
@@ -1352,6 +1371,8 @@ const SETTINGS_DEFAULTS = {
   hoverPreview: true,
   thumbTime: 3,        // seconds into the clip
   defaultEncoder: '',  // '' = pick the best available automatically
+  exportPreset: null,  // null until the user configures it; see PRESET_DEFAULTS
+  exportAskEveryTime: false,
 };
 
 let settings = { ...SETTINGS_DEFAULTS };
@@ -1359,6 +1380,7 @@ let settings = { ...SETTINGS_DEFAULTS };
 // Applies settings to the DOM. Everything here is idempotent so it can run on
 // load, on every slider tick, and after a reset.
 function applySettings() {
+  refreshPresetUi();
   document.documentElement.style.setProperty('--font-scale', settings.fontScale / 100);
   document.documentElement.style.setProperty('--card-min', settings.cardMin + 'px');
 
@@ -1367,6 +1389,7 @@ function applySettings() {
   thumbtimeSlider.value = settings.thumbTime;
   thumbtimeValue.textContent = settings.thumbTime + 's';
   hoverpreviewSwitch.classList.toggle('on', settings.hoverPreview);
+  presetaskSwitch.classList.toggle('on', settings.exportAskEveryTime);
   [...cardsizeSeg.children].forEach(b =>
     b.classList.toggle('active', parseInt(b.dataset.min) === settings.cardMin));
 }
@@ -1443,7 +1466,7 @@ function buildDefaultEncoderSelect() {
   [...hw, ...sw].forEach(e => {
     const o = document.createElement('option');
     o.value = e.id;
-    o.textContent = `${e.vendor} · ${e.family === 'hevc' ? 'H.265' : 'H.264'}` + (isHardware(e.id) ? ' (fast)' : '');
+    o.textContent = `${e.vendor} · ${FAMILY_NAMES[e.family] || e.family}` + (isHardware(e.id) ? ' (fast)' : '');
     defaultEncoderSel.appendChild(o);
   });
   defaultEncoderSel.value = settings.defaultEncoder;
@@ -1459,9 +1482,434 @@ settingsResetBtn.addEventListener('click', () => {
   settings = { ...SETTINGS_DEFAULTS };
   applySettings();
   buildDefaultEncoderSelect();
+  refreshExportLabels();
   encoderTouched = false;
   persistSettings();
   showToast('Settings reset to defaults', 'info');
 });
+
+
+// ── Export preset ─────────────────────────────────────────────────────────────
+// One saved recipe, plus a card action that works out the shortest route from a given
+// clip to it. The point is that a clip already matching the preset costs nothing — no
+// re-encode, no generation loss, just the file handed over.
+const presetOverlay       = document.getElementById('preset-overlay');
+const presetSubject       = document.getElementById('preset-subject');
+const presetNote          = document.getElementById('preset-note');
+const presetCloseBtn      = document.getElementById('preset-close-btn');
+const presetCancelBtn     = document.getElementById('preset-cancel');
+const presetSaveBtn       = document.getElementById('preset-save');
+const presetSummary       = document.getElementById('preset-summary');
+const presetSettingsMount = document.getElementById('preset-settings-mount');
+const presetModalMount    = document.getElementById('preset-modal-mount');
+const presetaskRow        = document.getElementById('presetask-row');
+const presetaskSwitch     = document.getElementById('presetask-switch');
+
+const PRESET_DEFAULTS = {
+  height: 1080,        // cap on the short side; null = keep whatever the clip has
+  codec: 'h264',       // 'h264' | 'av1'
+  range: 'sdr',        // 'sdr' = tone map HDR sources down | 'keep' = leave them HDR
+  toneMap: 'balanced',
+  crf: 23,
+  saveMode: 'new',     // 'new' | 'replace'
+};
+
+const PRESET_HEIGHTS = [
+  { v: null, label: 'Keep original' },
+  { v: 1440, label: '1440p' },
+  { v: 1080, label: '1080p' },
+  { v: 720,  label: '720p' },
+  { v: 480,  label: '480p' },
+];
+
+function presetOrDefaults() {
+  return { ...PRESET_DEFAULTS, ...(settings.exportPreset || {}) };
+}
+
+function presetSummaryShort(preset) {
+  const p = preset || presetOrDefaults();
+  return [
+    p.height ? p.height + 'p' : 'Source res',
+    FAMILY_NAMES[p.codec] || p.codec,
+    p.range === 'sdr' ? 'SDR' : 'Keep HDR',
+  ].join(' · ');
+}
+
+// ── The control panel, mounted in both Settings and the export modal ──────────
+// Building it rather than writing the markup twice keeps the two copies honestly
+// identical, and lets the modal edit a draft while Settings edits the real thing.
+function buildPresetUi(mount, draft, onChange) {
+  mount.innerHTML = '';
+  const refreshers = [];
+  const commit = () => { onChange(); refreshAll(); };
+
+  function segment(labelText, options, read, write, tip) {
+    const wrap = document.createElement('div');
+    wrap.className = 'enc-field';
+
+    const lab = document.createElement('div');
+    lab.className = 'enc-label';
+    const labName = document.createElement('span');
+    labName.textContent = labelText;
+    lab.appendChild(labName);
+
+    const seg = document.createElement('div');
+    seg.className = 'enc-seg';
+    options.forEach(o => {
+      const b = document.createElement('button');
+      b.textContent = o.label;
+      b._presetValue = o.v;
+      b.addEventListener('click', () => { write(o.v); commit(); });
+      seg.appendChild(b);
+    });
+
+    const tipEl = document.createElement('div');
+    tipEl.className = 'enc-tip';
+
+    wrap.append(lab, seg, tipEl);
+    mount.appendChild(wrap);
+    refreshers.push(() => {
+      [...seg.children].forEach(b => b.classList.toggle('active', b._presetValue === read()));
+      tipEl.textContent = typeof tip === 'function' ? tip() : tip;
+    });
+    return wrap;
+  }
+
+  segment('Resolution', PRESET_HEIGHTS, () => draft.height, v => draft.height = v,
+    () => draft.height
+      ? 'Caps the short side at ' + draft.height + 'p. Clips already at or below it are left alone — nothing is ever upscaled.'
+      : 'Keeps whatever resolution each clip already has.');
+
+  segment('Codec', [{ v: 'h264', label: 'H.264' }, { v: 'av1', label: 'AV1' }],
+    () => draft.codec, v => draft.codec = v,
+    () => draft.codec === 'av1'
+      ? 'Smallest files at matched quality. Recent players, browsers and phones handle AV1; older ones and some editors do not.'
+      : 'Opens in literally everything — every editor, player, chat app and upload target. The safe choice for clips you are sending to people.');
+
+  segment('Dynamic range', [{ v: 'sdr', label: 'Convert to SDR' }, { v: 'keep', label: 'Keep HDR' }],
+    () => draft.range, v => draft.range = v,
+    () => draft.range === 'sdr'
+      ? 'HDR clips get tone mapped so they look right on ordinary screens. Clips that are already SDR are untouched by this.'
+      : 'Leaves HDR clips as they are. They will still look grey and flat to anyone without an HDR display.');
+
+  const toneWrap = segment('SDR look',
+    [{ v: 'balanced', label: 'Balanced' }, { v: 'filmic', label: 'Filmic' }, { v: 'punchy', label: 'Punchy' }],
+    () => draft.toneMap, v => draft.toneMap = v,
+    () => TONEMAP_LOOK_TIPS[draft.toneMap]);
+
+  // ── Quality ──
+  const qWrap = document.createElement('div');
+  qWrap.className = 'enc-field';
+
+  const qLab = document.createElement('div');
+  qLab.className = 'enc-label';
+  const qLabName = document.createElement('span');
+  qLabName.textContent = 'Quality';
+  const qLabValue = document.createElement('span');
+  qLabValue.className = 'enc-value';
+  qLab.append(qLabName, qLabValue);
+
+  const qSlider = document.createElement('input');
+  qSlider.type = 'range';
+  qSlider.className = 'enc-slider';
+  qSlider.min = '16';
+  qSlider.max = '34';
+  qSlider.step = '1';
+  qSlider.addEventListener('input', () => { draft.crf = parseInt(qSlider.value); commit(); });
+
+  const qScale = document.createElement('div');
+  qScale.className = 'slider-scale';
+  const qScaleLo = document.createElement('span');
+  qScaleLo.textContent = '16 — bigger, sharper';
+  const qScaleHi = document.createElement('span');
+  qScaleHi.textContent = '34 — smaller, blockier';
+  qScale.append(qScaleLo, qScaleHi);
+
+  const qTip = document.createElement('div');
+  qTip.className = 'enc-tip';
+
+  qWrap.append(qLab, qSlider, qScale, qTip);
+  mount.appendChild(qWrap);
+  refreshers.push(() => {
+    qSlider.value = draft.crf;
+    qLabValue.textContent = 'CRF ' + draft.crf + ' · ' + crfDescriptor(draft.crf);
+    qTip.textContent = 'Only applies when a clip actually has to be re-encoded. ' + crfTipText(draft.crf, draft.codec);
+  });
+
+  segment('Output', [{ v: 'new', label: 'Save as a new file' }, { v: 'replace', label: 'Replace original' }],
+    () => draft.saveMode, v => draft.saveMode = v,
+    () => draft.saveMode === 'new'
+      ? 'Writes clip_export.mp4 next to the original and leaves the original alone. A clip that already matches the preset is copied, not re-encoded.'
+      : 'Overwrites the original in place. A clip that already matches the preset is left exactly as it is.');
+
+  function refreshAll() {
+    // The SDR look only means anything when HDR is actually being converted.
+    toneWrap.style.display = draft.range === 'sdr' ? '' : 'none';
+    refreshers.forEach(fn => fn());
+  }
+  refreshAll();
+  return { refresh: refreshAll, draft };
+}
+
+let presetSettingsUi    = null;
+let presetSettingsDraft = null;
+
+function refreshPresetUi() {
+  if (!presetSettingsUi) {
+    // Settings edits the saved preset in place — there is nothing to cancel back to.
+    presetSettingsDraft = presetOrDefaults();
+    presetSettingsUi = buildPresetUi(presetSettingsMount, presetSettingsDraft, () => {
+      settings.exportPreset = { ...presetSettingsDraft };
+      persistSettings();
+      refreshExportLabels();
+    });
+    return;
+  }
+  // Re-sync before redrawing: prefs loading, a Reset, or the export modal can all move
+  // the preset out from under this panel, and a stale draft would write itself back
+  // over the real one the next time anything here was clicked.
+  Object.assign(presetSettingsDraft, presetOrDefaults());
+  presetSettingsUi.refresh();
+}
+
+// ── Working out what a clip still needs ──────────────────────────────────────
+function presetOutputDims(meta, height) {
+  const w = meta && meta.width, h = meta && meta.height;
+  if (!w || !h || !height) return { w, h };
+  // Portrait clips are capped on their short side too, which is the width.
+  if (w < h) return { w: height, h: Math.round((h / w) * height / 2) * 2 };
+  return { w: Math.round((w / h) * height / 2) * 2, h: height };
+}
+
+function planExport(clip, meta, preset) {
+  const ext   = (clip.name.match(/\.[^.]+$/) || [''])[0].toLowerCase();
+  const short = meta && meta.width && meta.height ? Math.min(meta.width, meta.height) : null;
+
+  const canToneMap = filterCaps ? filterCaps.zscale : true;
+  const needResize = !!(preset.height && short && short > preset.height);
+  const needCodec  = !!(meta && meta.videoCodec && meta.videoCodec !== preset.codec);
+  const needTone   = preset.range === 'sdr' && !!(meta && meta.isHdr) && canToneMap;
+  const needMp4    = ext !== '.mp4';
+
+  // Everything that touches the picture collapses into one ffmpeg pass — chaining
+  // separate encodes would just stack generation loss to arrive at the same frames.
+  const encode = needResize || needCodec || needTone;
+  const remux  = !encode && needMp4;
+
+  const steps = [];
+  if (needResize) {
+    const out = presetOutputDims(meta, preset.height);
+    steps.push('Scale ' + meta.width + '×' + meta.height + ' → ' + out.w + '×' + out.h);
+  }
+  if (needCodec) steps.push('Re-encode ' + codecLabel(meta.videoCodec) + ' → ' + FAMILY_NAMES[preset.codec]);
+  if (needTone)  steps.push('Tone map HDR → SDR (' + TONEMAP_NAMES[preset.toneMap] + ')');
+  if (remux)     steps.push('Repackage ' + ext + ' → .mp4, no re-encode');
+  if (encode && needMp4) steps.push('Write it out as .mp4');
+
+  // Worth saying out loud where we deliberately decline to do something.
+  const skipped = [];
+  if (preset.height && short && short <= preset.height) {
+    skipped.push(short === preset.height
+      ? 'Already ' + short + 'p'
+      : 'Already ' + short + 'p — not upscaling to ' + preset.height + 'p');
+  }
+  if (meta && meta.videoCodec && meta.videoCodec === preset.codec) {
+    skipped.push('Already ' + FAMILY_NAMES[preset.codec]);
+  }
+  if (preset.range === 'sdr' && meta && !meta.isHdr) skipped.push('Already SDR');
+  if (preset.range === 'sdr' && meta && meta.isHdr && !canToneMap) {
+    skipped.push('Cannot tone map — this ffmpeg build has no zscale filter');
+  }
+
+  return { encode, remux, steps, skipped, ext, needResize, needTone,
+           nothingToDo: !encode && !remux };
+}
+
+function encoderForFamily(family) {
+  const list = [...(encoderList?.hardware ?? []), ...(encoderList?.software ?? [])];
+  const pick = list.find(e => e.id === settings.defaultEncoder && e.family === family)
+    || list.find(e => e.family === family && isHardware(e.id))
+    || list.find(e => e.family === family);
+  return pick ? pick.id : (family === 'av1' ? 'libsvtav1' : 'libx264');
+}
+
+function exportOutputName(clip, plan) {
+  const base = clip.name.replace(/\.[^.]+$/, '');
+  return base + '_export' + (plan.encode || plan.remux ? '.mp4' : plan.ext);
+}
+
+// ── The export action ────────────────────────────────────────────────────────
+let presetPending = null;   // { clip, meta, draft } while the modal is open
+
+async function startExport(clip) {
+  if (!encoderList) encoderList = await api.getEncoders();
+  if (!filterCaps)  filterCaps  = await api.getFilters();
+
+  let meta = metaCache.get(clip.fullPath) || null;
+  if (!meta) {
+    meta = await api.probeVideo(clip.fullPath);
+    if (meta) { metaCache.set(clip.fullPath, meta); applyBadgesFor(clip.fullPath); }
+  }
+
+  const configured = !!settings.exportPreset;
+  if (!configured || settings.exportAskEveryTime) {
+    openPresetModal(clip, meta, !configured);
+    return;
+  }
+  await runExport(clip, meta, presetOrDefaults());
+}
+
+function openPresetModal(clip, meta, firstTime) {
+  const draft = presetOrDefaults();
+  presetSubject.textContent = clip.name;
+  presetSaveBtn.textContent = firstTime ? 'Save & export' : 'Export';
+
+  presetNote.innerHTML = firstTime
+    ? 'This is your first export, so set the recipe up once here. <strong>Export</strong> reuses it for every clip after this — doing only whatever that clip still needs — and you can change it any time under <strong>Settings → Export preset</strong>.'
+    : 'Changes here save back to your preset. Turn off <strong>Ask before every export</strong> in Settings to skip this step.';
+  presetNote.classList.add('show');
+
+  buildPresetUi(presetModalMount, draft, () => renderPresetPlan(clip, meta, draft));
+  presetPending = { clip, meta, draft };
+  renderPresetPlan(clip, meta, draft);
+  presetOverlay.classList.add('open');
+}
+
+function renderPresetPlan(clip, meta, draft) {
+  const plan = planExport(clip, meta, draft);
+  const items = [];
+
+  if (plan.nothingToDo) {
+    items.push(draft.saveMode === 'replace'
+      ? '<li>Nothing to do — this clip already matches</li>'
+      : '<li>Copy it as-is — the picture already matches</li>');
+  }
+  plan.steps.forEach(t => items.push('<li>' + t + '</li>'));
+  plan.skipped.forEach(t => items.push('<li class="skip">' + t + '</li>'));
+
+  const dest = draft.saveMode === 'replace'
+    ? (plan.nothingToDo ? 'leaves the original as it is' : 'replaces the original')
+    : exportOutputName(clip, plan);
+
+  presetSummary.innerHTML =
+    '<strong>' + presetSummaryShort(draft) + '</strong> · ' + dest +
+    '<div class="preset-plan"><div class="preset-plan-head">For this clip</div><ul>' +
+    items.join('') + '</ul></div>';
+}
+
+function closePresetModal() {
+  presetOverlay.classList.remove('open');
+  presetPending = null;
+}
+
+presetaskRow.addEventListener('click', () => {
+  settings.exportAskEveryTime = !settings.exportAskEveryTime;
+  applySettings();
+  persistSettings();
+});
+
+presetCloseBtn.addEventListener('click', closePresetModal);
+presetCancelBtn.addEventListener('click', closePresetModal);
+presetOverlay.addEventListener('click', e => { if (e.target === presetOverlay) closePresetModal(); });
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && presetOverlay.classList.contains('open')) closePresetModal();
+});
+
+presetSaveBtn.addEventListener('click', async () => {
+  if (!presetPending) return;
+  const { clip, meta, draft } = presetPending;
+  settings.exportPreset = { ...draft };
+  persistSettings();
+  refreshExportLabels();
+  refreshPresetUi();   // pull what was just decided here through to the Settings copy
+  closePresetModal();
+  await runExport(clip, meta, draft);
+});
+
+async function runExport(clip, meta, preset) {
+  const plan = planExport(clip, meta, preset);
+
+  // Nothing to re-encode, nothing to re-wrap, nothing to copy: hand the file over.
+  if (plan.nothingToDo && preset.saveMode === 'replace') {
+    api.openInExplorer(clip.fullPath);
+    showToast('✓ Already matches your preset — showing it in Explorer', 'success', 4000);
+    return;
+  }
+
+  api.watchFolder('');
+  progTitle.textContent = 'Exporting…';
+  progSub.textContent = plan.encode ? 'Starting ffmpeg' : 'Copying';
+  progBar.style.width = '0%';
+  progBarWrap.classList.toggle('show', plan.encode);
+  progCancelBtn.classList.toggle('show', plan.encode);
+  progressOverlay.classList.add('show');
+
+  const result = plan.encode
+    ? await api.encodeVideo({
+        inputPath: clip.fullPath,
+        saveMode: preset.saveMode,
+        suffix: '_export',
+        container: 'mp4',
+        encoder: encoderForFamily(preset.codec),
+        speed: 5,
+        rateMode: 'crf',
+        crf: preset.crf,
+        bitrateKbps: 4000,
+        targetHeight: plan.needResize ? preset.height : null,
+        targetFps: null,
+        toneMap: plan.needTone ? preset.toneMap : null,
+        audioMode: 'copy',
+        audioKbps: 160,
+      })
+    : await api.passthrough({
+        inputPath: clip.fullPath,
+        saveMode: preset.saveMode,
+        suffix: '_export',
+        container: 'mp4',
+        remux: plan.remux,
+      });
+
+  progressOverlay.classList.remove('show');
+  progBarWrap.classList.remove('show');
+  progCancelBtn.classList.remove('show');
+  progTitle.textContent = 'Trimming…';
+
+  if (result.cancelled) {
+    startWatching(rootFolder);
+    showToast('Export cancelled', 'info');
+    return;
+  }
+  if (!result.success) {
+    startWatching(rootFolder);
+    showToast('Export failed: ' + (result.details || result.error), 'error', 6000);
+    return;
+  }
+
+  // Both caches key on path, and a replace reuses the path with new content.
+  thumbCache.delete(clip.fullPath);
+  metaCache.delete(clip.fullPath);
+  api.openInExplorer(result.outputPath);
+
+  const name = result.outputPath.split('\\').pop();
+  const how = plan.encode
+    ? fmtBytes(result.size) + ' · ' + Math.round((result.size / clip.size) * 100) + '% of original'
+    : plan.remux ? 'repackaged as .mp4, nothing re-encoded'
+                 : 'copied as-is, nothing re-encoded';
+  showToast('✓ ' + name + ' — ' + how, 'success', 5000);
+  await scanAndRender();
+}
+
+// The menu entry carries the preset, so you know what Export will do before clicking.
+function exportMenuLabel() {
+  return settings.exportPreset ? 'Export · ' + presetSummaryShort() : 'Set up export…';
+}
+
+function refreshExportLabels() {
+  const label = exportMenuLabel();
+  cardMap.forEach(card => {
+    const el = card.querySelector('[data-action="export"] .export-label');
+    if (el) el.textContent = label;
+  });
+}
 
 applySettings();

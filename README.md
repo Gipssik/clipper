@@ -144,6 +144,55 @@ leaves nothing behind.
 
 ---
 
+## Export preset
+
+The other actions each answer one question. **Export** answers the whole thing: *get this clip
+into the shape I send people, and open it.*
+
+Set the recipe once — resolution cap, codec, dynamic range, quality, and whether to write a new file
+or replace the original. After that, **Export** in a card's ⋮ menu carries the preset in its label
+(`Export · 1080p · H.264 · SDR`) so you know what it will do before clicking.
+
+What makes it worth having is what it *doesn't* do. Export compares the clip to the preset and takes
+the shortest route there:
+
+| The clip | What actually happens |
+| --- | --- |
+| Already matches in every way | Nothing is re-encoded. Shown in Explorer as-is (or copied, if the preset saves a new file). |
+| Only the container is wrong (`.mkv`, `.mov`) | Repackaged to `.mp4` with `-c copy`. Bit-for-bit the same video, in about a tenth of a second. |
+| Needs a downscale, a codec change, a tone map, or any mix | **One** ffmpeg pass doing all of it at once. |
+
+That last row is the important one: chaining separate encodes would stack generation loss to arrive at
+exactly the same frames, so scaling, tone mapping and the codec change all happen in a single pass.
+
+When it finishes — or immediately, if there was nothing to do — the file is revealed in Explorer, the
+same way **Show in Explorer** does it.
+
+The first time you hit Export, the preset modal opens so you can set it up; it saves and runs in one
+go. After that Export just goes, unless you turn on **Ask before every export** in Settings, which
+shows the options again each time along with the exact plan for that clip:
+
+```
+FOR THIS CLIP
+  →  Re-encode AV1 → H.264
+  →  Tone map HDR → SDR (Balanced)
+  ·  Already 720p — not upscaling to 1080p
+```
+
+Lines with `→` are work that will happen; lines with `·` are things deliberately skipped.
+
+### Codec choice
+
+**H.264** opens in literally everything and is the right default for clips you are sending to people.
+**AV1** produces distinctly smaller files at matched quality — on a GPU with an AV1 encoder (RTX 40
+series and newer, Arc, RDNA3) it is also fast, since Clipper probes for `av1_nvenc`, `av1_qsv` and
+`av1_amf` at startup and falls back to SVT-AV1 on the CPU. The catch is support: older phones,
+browsers and editors will not open AV1. Both codecs are also available per-clip in **Compress**.
+
+Resolution is a *cap*, not a target — a 720p clip under a 1080p preset is left alone, never upscaled.
+
+---
+
 ## Settings
 
 The **⚙** button in the titlebar opens Settings. Everything saves as you change it.
@@ -155,6 +204,8 @@ The **⚙** button in the titlebar opens Settings. Everything saves as you chang
 | **Play preview on hover** | Turn off if scrolling a large folder feels heavy. |
 | **Thumbnail frame** | Which second of each clip to grab its still from. Bump it up if your clips open on a black intro or a loading screen. Changing it re-grabs the visible stills. |
 | **Default encoder** | Preselected whenever you open Compress or Convert. *Automatic* prefers your GPU when one is usable. You can still override it per clip. |
+| **Export preset** | The saved recipe **Export** uses — resolution cap, codec, dynamic range and SDR look, quality, and new file vs. replace. Editing it here takes effect immediately. |
+| **Ask before every export** | Shows the preset options on every export, with the plan for that clip, instead of just running. Off by default. |
 
 ---
 
@@ -178,3 +229,5 @@ Any format ffmpeg supports: `.mp4`, `.mov`, `.avi`, `.mkv`, `.webm`, `.wmv`, `.f
   left alone.
 - Tone mapping is one-way. The SDR copy cannot be turned back into HDR, so keep the original if you still
   want the HDR version.
+- **Export** never re-encodes to reach a state the clip is already in. Repackaging a container and copying
+  a file are both lossless; only an actual picture change costs quality.

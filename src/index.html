@@ -432,38 +432,62 @@
   .q-badge.hdr       { border-color: rgba(255,176,82,0.5);  color: #ffb052; }
   .q-badge.pending   { opacity: 0.35; }
 
+  /* ── Export preset ── */
+  #preset-modal { width: 640px; }
+  #preset-summary {
+    flex: 1; min-width: 0;
+    font-size: calc(12px * var(--font-scale)); line-height: 1.55; color: var(--text2);
+  }
+  #preset-summary strong { color: var(--accent); font-weight: 700; }
+  .preset-plan {
+    margin-top: 10px; padding: 12px 15px; border-radius: 7px;
+    background: var(--surface2); border: 1px solid var(--border2);
+  }
+  .preset-plan-head {
+    font-size: calc(10.5px * var(--font-scale)); font-weight: 700;
+    letter-spacing: 0.1em; text-transform: uppercase; color: var(--text2); margin-bottom: 8px;
+  }
+  .preset-plan ul { list-style: none; margin: 0; padding: 0; }
+  .preset-plan li {
+    display: flex; gap: 9px; align-items: baseline;
+    font-size: calc(12.5px * var(--font-scale)); line-height: 1.7; color: var(--text);
+  }
+  .preset-plan li::before { content: '→'; color: var(--accent); flex-shrink: 0; }
+  .preset-plan li.skip { color: var(--text2); }
+  .preset-plan li.skip::before { content: '·'; color: var(--text3); }
+
   /* ── Encode modal ── */
-  #encode-overlay {
+  #encode-overlay, #preset-overlay {
     position: fixed; inset: 0; z-index: 250;
     background: rgba(10,10,11,0.72);
     backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
     display: none; align-items: center; justify-content: center; padding: 20px;
   }
-  #encode-overlay.open { display: flex; }
+  #encode-overlay.open, #preset-overlay.open { display: flex; }
 
-  #encode-modal {
+  #encode-modal, #preset-modal {
     background: var(--surface); border: 1px solid var(--border2);
     border-radius: 14px; width: 780px; max-width: 100%; max-height: 90vh;
     display: flex; flex-direction: column; overflow: hidden;
     box-shadow: 0 32px 80px rgba(0,0,0,0.7);
   }
 
-  #encode-header {
+  #encode-header, #preset-header {
     display: flex; align-items: center; gap: 12px;
     padding: 17px 24px; border-bottom: 1px solid var(--border); flex-shrink: 0;
   }
-  #encode-title { font-size: calc(14px * var(--font-scale)); font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); white-space: nowrap; }
-  #encode-subject { font-size: calc(12.5px * var(--font-scale)); color: var(--text2); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  #encode-close-btn {
+  #encode-title, #preset-title { font-size: calc(14px * var(--font-scale)); font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); white-space: nowrap; }
+  #encode-subject, #preset-subject { font-size: calc(12.5px * var(--font-scale)); color: var(--text2); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #encode-close-btn, #preset-close-btn {
     width: 28px; height: 28px; border: none; background: var(--surface2); cursor: pointer;
     color: var(--text2); display: flex; align-items: center; justify-content: center;
     border-radius: 6px; transition: background 0.15s, color 0.15s; flex-shrink: 0;
   }
-  #encode-close-btn:hover { background: var(--danger); color: #fff; }
+  #encode-close-btn:hover, #preset-close-btn:hover { background: var(--danger); color: #fff; }
 
-  #encode-body { padding: 22px 24px 24px; overflow-y: auto; flex: 1; }
-  #encode-body::-webkit-scrollbar { width: 6px; }
-  #encode-body::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+  #encode-body, #preset-body { padding: 22px 24px 24px; overflow-y: auto; flex: 1; }
+  #encode-body::-webkit-scrollbar, #preset-body::-webkit-scrollbar { width: 6px; }
+  #encode-body::-webkit-scrollbar-thumb, #preset-body::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
 
   /* Source summary */
   #encode-source {
@@ -475,12 +499,12 @@
   .src-cell .src-k { font-size: calc(10px * var(--font-scale)); font-weight: 700; letter-spacing: 0.09em; text-transform: uppercase; color: var(--text2); }
   .src-cell .src-v { font-family: 'DM Mono', monospace; font-size: calc(13px * var(--font-scale)); color: var(--text); margin-top: 4px; }
 
-  #encode-note {
+  #encode-note, #preset-note {
     display: none; margin-bottom: 20px; padding: 12px 15px; border-radius: 7px;
     font-size: calc(12.5px * var(--font-scale)); line-height: 1.6;
     background: rgba(232,255,71,0.07); border: 1px solid rgba(232,255,71,0.28); color: #d6e89a;
   }
-  #encode-note.show { display: block; }
+  #encode-note.show, #preset-note.show { display: block; }
 
   /* Field rows */
   .enc-field { margin-bottom: 22px; }
@@ -536,7 +560,7 @@
   .enc-row { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
 
   /* Estimate footer */
-  #encode-footer {
+  #encode-footer, #preset-footer {
     flex-shrink: 0; border-top: 1px solid var(--border);
     padding: 17px 24px; display: flex; align-items: center; gap: 16px;
   }
@@ -547,17 +571,18 @@
   #est-delta.grow { color: var(--danger); }
   #encode-estimate .est-note { font-size: calc(11.5px * var(--font-scale)); line-height: 1.5; color: var(--text2); margin-top: 5px; }
 
-  #encode-save-new, #encode-replace {
+  #encode-save-new, #encode-replace, #preset-cancel, #preset-save {
     min-height: 40px; padding: 0 20px; border: none; border-radius: 6px;
     font-family: 'Syne', sans-serif; font-weight: 700; font-size: calc(12.5px * var(--font-scale));
     letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer;
     transition: background 0.15s, transform 0.1s; flex-shrink: 0;
   }
-  #encode-save-new { background: var(--surface2); border: 1px solid var(--border2); color: var(--text); }
-  #encode-save-new:hover { background: var(--border2); }
-  #encode-replace { background: var(--accent); color: #0a0a0b; }
-  #encode-replace:hover { background: var(--accent2); }
-  #encode-save-new:active, #encode-replace:active { transform: scale(0.97); }
+  #encode-save-new, #preset-cancel { background: var(--surface2); border: 1px solid var(--border2); color: var(--text); }
+  #encode-save-new:hover, #preset-cancel:hover { background: var(--border2); }
+  #encode-replace, #preset-save { background: var(--accent); color: #0a0a0b; }
+  #encode-replace:hover, #preset-save:hover { background: var(--accent2); }
+  #encode-save-new:active, #encode-replace:active,
+  #preset-cancel:active, #preset-save:active { transform: scale(0.97); }
 
   /* ── Determinate progress ── */
   #prog-bar-wrap {
@@ -1002,12 +1027,58 @@
         </div>
       </div>
 
+      <div class="set-group">
+        <div class="set-group-label">Export preset</div>
+
+        <div class="enc-tip" style="margin-top:0; margin-bottom:18px">
+          One saved recipe for clips you are about to share. <strong>Export</strong> in a card's ⋮ menu works
+          out what a clip still needs to match it, does only that, and then opens it in Explorer. A clip that
+          already matches is not re-encoded.
+        </div>
+
+        <div id="preset-settings-mount"></div>
+
+        <div class="enc-field" style="margin-bottom:0">
+          <div class="set-toggle-row" id="presetask-row">
+            <div class="set-toggle-text">
+              <div class="enc-label" style="margin-bottom:6px"><span>Ask before every export</span></div>
+              <div class="enc-tip" style="margin-top:0">Shows these options each time, with the plan for that clip, so you can tweak them before it runs. Off means Export just goes.</div>
+            </div>
+            <div class="set-switch" id="presetask-switch"></div>
+          </div>
+        </div>
+      </div>
+
     </div>
 
     <div id="settings-footer">
       <span id="settings-hint">Saved automatically</span>
       <button id="settings-reset">Reset</button>
       <button id="settings-done">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- Export preset modal -->
+<div id="preset-overlay">
+  <div id="preset-modal">
+    <div id="preset-header">
+      <span id="preset-title">Export preset</span>
+      <span id="preset-subject"></span>
+      <button id="preset-close-btn">
+        <svg width="10" height="10" viewBox="0 0 10 10"><line x1="0" y1="0" x2="10" y2="10" stroke="currentColor" stroke-width="1.5"/><line x1="10" y1="0" x2="0" y2="10" stroke="currentColor" stroke-width="1.5"/></svg>
+      </button>
+    </div>
+
+    <div id="preset-body">
+      <div id="preset-note"></div>
+      <div id="preset-modal-mount"></div>
+    </div>
+
+    <div id="preset-footer">
+      <div id="preset-summary"></div>
+      <button id="preset-cancel">Cancel</button>
+      <button id="preset-save">Export</button>
     </div>
   </div>
 </div>

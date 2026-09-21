@@ -243,6 +243,7 @@ ipcMain.handle('encode:cancel', () => {
   return true;
 });
 ipcMain.handle('video:encode', async (e, opts) => runEncode(opts, e.sender));
+ipcMain.handle('video:passthrough', async (_, opts) => runPassthrough(opts));
 
 ipcMain.handle('window:minimize', () => mainWindow.minimize());
 ipcMain.handle('window:maximize', () => { if (mainWindow.isMaximized()) mainWindow.unmaximize(); else mainWindow.maximize(); });
@@ -360,10 +361,13 @@ function probeFile(filePath) {
 const HW_CANDIDATES = [
   { id: 'h264_nvenc', family: 'h264', vendor: 'NVIDIA NVENC' },
   { id: 'hevc_nvenc', family: 'hevc', vendor: 'NVIDIA NVENC' },
+  { id: 'av1_nvenc',  family: 'av1',  vendor: 'NVIDIA NVENC' },
   { id: 'h264_qsv',   family: 'h264', vendor: 'Intel QuickSync' },
   { id: 'hevc_qsv',   family: 'hevc', vendor: 'Intel QuickSync' },
+  { id: 'av1_qsv',    family: 'av1',  vendor: 'Intel QuickSync' },
   { id: 'h264_amf',   family: 'h264', vendor: 'AMD AMF' },
   { id: 'hevc_amf',   family: 'hevc', vendor: 'AMD AMF' },
+  { id: 'av1_amf',    family: 'av1',  vendor: 'AMD AMF' },
 ];
 
 let encoderProbe = null;
@@ -408,8 +412,9 @@ function detectEncoders() {
     const results = await Promise.all(HW_CANDIDATES.map(c => testEncoder(c.id)));
     return {
       software: [
-        { id: 'libx264', family: 'h264', vendor: 'CPU (x264)' },
-        { id: 'libx265', family: 'hevc', vendor: 'CPU (x265)' },
+        { id: 'libx264',   family: 'h264', vendor: 'CPU (x264)' },
+        { id: 'libx265',   family: 'hevc', vendor: 'CPU (x265)' },
+        { id: 'libsvtav1', family: 'av1',  vendor: 'CPU (SVT-AV1)' },
       ],
       hardware: HW_CANDIDATES.filter((_, i) => results[i]),
     };
@@ -427,6 +432,7 @@ const SW_PRESETS = ['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'med
 // Maps our shared 0..7 speed scale onto whatever each encoder family calls its presets.
 function presetArgs(encoder, speed) {
   const i = Math.max(0, Math.min(7, speed ?? 4));
+  if (encoder === 'libsvtav1')    return ['-preset', String(12 - i)];   // 13 = fastest, 0 = slowest
   if (encoder.endsWith('_nvenc')) return ['-preset', 'p' + Math.max(1, Math.min(7, 8 - i))];
   if (encoder.endsWith('_qsv'))   return ['-preset', SW_PRESETS[i] || 'medium'];
   if (encoder.endsWith('_amf'))   return ['-quality', i <= 2 ? 'speed' : i >= 6 ? 'quality' : 'balanced'];
@@ -478,6 +484,76 @@ function uniquePath(dir, base, ext) {
   let i = 1;
   while (fs.existsSync(candidate)) { candidate = path.join(dir, base + '_' + i + ext); i++; }
   return candidate;
+}
+
+/**
+ * Re-wraps or duplicates a clip without touching the picture. Export reaches for this
+ * when a clip already looks the way the preset wants it to: re-encoding would cost
+ * quality and time to arrive at the same frames.
+ *
+ * opts: { inputPath, saveMode:'new'|'replace', suffix, container:'mp4', remux:boolean }
+ */
+async function runPassthrough(opts) {
+  const inputPath = opts.inputPath;
+  const dir       = path.dirname(inputPath);
+  const srcExt    = path.extname(inputPath);
+  const base      = path.basename(inputPath, srcExt);
+  const outExt    = opts.remux ? '.' + (opts.container || 'mp4') : srcExt;
+
+  const finalPath = opts.saveMode === 'replace'
+    ? path.join(dir, base + outExt)
+    : uniquePath(dir, base + (opts.suffix || '_export'), outExt);
+
+  // Nothing to do at all — the file already is what was asked for.
+  if (path.resolve(finalPath) === path.resolve(inputPath)) {
+    try { return { success: true, outputPath: inputPath, size: fs.statSync(inputPath).size, untouched: true }; }
+    catch (e) { return { success: false, error: e.message }; }
+  }
+
+  if (!opts.remux) {
+    try {
+      fs.copyFileSync(inputPath, finalPath);
+      return { success: true, outputPath: finalPath, size: fs.statSync(finalPath).size, copied: true };
+    } catch (e) { return { success: false, error: e.message }; }
+  }
+
+  const src = await probeFile(inputPath);
+  const tmpPath = path.join(os.tmpdir(), 'clipper_mux_' + Date.now() + outExt);
+  const args = ['-y', '-hide_banner', '-loglevel', 'error', '-i', inputPath,
+                '-map', '0:v:0', '-map', '0:a:0?', '-c:v', 'copy'];
+
+  // The video survives the container change untouched; the audio only does when the
+  // new container actually accepts that codec.
+  if (opts.container === 'mp4' && !MP4_SAFE_AUDIO.includes((src && src.audioCodec) || '')) {
+    args.push('-c:a', 'aac', '-b:a', '160k');
+  } else {
+    args.push('-c:a', 'copy');
+  }
+  if (opts.container === 'mp4') args.push('-movflags', '+faststart');
+  args.push(tmpPath);
+
+  return new Promise(resolve => {
+    const proc = spawn(getFfmpegPath(), args, { windowsHide: true });
+    let stderr = '';
+    proc.stderr.on('data', d => stderr += d.toString());
+    proc.on('close', code => {
+      const cleanup = () => { try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch {} };
+      if (code !== 0 || !fs.existsSync(tmpPath)) {
+        cleanup();
+        resolve({ success: false, error: 'ffmpeg exited with code ' + code, details: stderr.trim() });
+        return;
+      }
+      try {
+        if (opts.saveMode === 'replace' && path.resolve(finalPath) !== path.resolve(inputPath)) {
+          fs.unlinkSync(inputPath);
+        }
+        fs.copyFileSync(tmpPath, finalPath);
+        fs.unlinkSync(tmpPath);
+        resolve({ success: true, outputPath: finalPath, size: fs.statSync(finalPath).size, remuxed: true });
+      } catch (e) { cleanup(); resolve({ success: false, error: e.message }); }
+    });
+    proc.on('error', e => resolve({ success: false, error: e.message }));
+  });
 }
 
 /**

@@ -15,6 +15,7 @@ contextBridge.exposeInMainWorld('api', {
   getEncoders:    ()          => ipcRenderer.invoke('encode:encoders'),
   getFilters:     ()          => ipcRenderer.invoke('encode:filters'),
   encodeVideo:    (opts)      => ipcRenderer.invoke('video:encode', opts),
+  passthrough:    (opts)      => ipcRenderer.invoke('video:passthrough', opts),
   cancelEncode:   ()          => ipcRenderer.invoke('encode:cancel'),
   onEncodeProgress: (cb)      => ipcRenderer.on('encode:progress', (_, p) => cb(p)),
   watchFolder:    (root)      => ipcRenderer.invoke('folder:watch', root),

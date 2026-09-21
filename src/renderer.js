@@ -381,10 +381,41 @@ function syncGrid() {
     if (!card) {
       card = makeCard(v);
       cardMap.set(v.fullPath, card);
+    } else if (card._video.mtime !== v.mtime || card._video.size !== v.size) {
+      // Same path, different file: something rewrote it in place.
+      refreshCard(card, v);
     }
+    // Handlers read through this, so they never act on a record the file outgrew.
+    card._video = v;
     const sibling = videoGrid.children[i];
     if (sibling !== card) videoGrid.insertBefore(card, sibling ?? null);
   });
+}
+
+// Everything a card displays — badges, still, size and date — is derived once, when the
+// card is built. A replace-mode trim, compress, convert or export (or an edit from
+// outside the app) leaves the path alone and changes the file under it, so the card has
+// to drop all of that and derive it again rather than keep asserting what used to be true.
+function refreshCard(card, v) {
+  thumbCache.delete(v.fullPath);
+  metaCache.delete(v.fullPath);
+
+  const badges = card.querySelector('.vid-badges');
+  if (badges) badges.innerHTML = '';
+
+  // Both of these are offered only for particular source formats, and until the probe
+  // lands again we no longer know what this file is.
+  ['convert', 'sdr'].forEach(action => {
+    const item = card.querySelector(`[data-action="${action}"]`);
+    if (item) item.style.display = 'none';
+  });
+
+  const metaText = card.querySelector('.vid-meta-text');
+  if (metaText) metaText.innerHTML = `<span>${fmtBytes(v.size)}</span><span>${fmtDate(v.mtime)}</span>`;
+
+  const img = card.querySelector('.vid-thumb-img');
+  if (img) img.removeAttribute('src');
+  requeueThumb(v.fullPath, card);
 }
 
 function makeCard(v) {
@@ -426,25 +457,26 @@ function makeCard(v) {
   dropdown.addEventListener('click', async e => {
     const action = e.target.closest('[data-action]')?.dataset.action;
     closeOpenDropdown();
+    const rec = card._video || v;   // this file may have been rewritten since the card was built
     if (action === 'export') {
-      startExport(v);
+      startExport(rec);
     } else if (action === 'explorer') {
-      api.openInExplorer(v.fullPath);
+      api.openInExplorer(rec.fullPath);
     } else if (action === 'compress') {
-      openEncodeModal(v, 'compress');
+      openEncodeModal(rec, 'compress');
     } else if (action === 'convert') {
-      openEncodeModal(v, 'convert');
+      openEncodeModal(rec, 'convert');
     } else if (action === 'sdr') {
-      openEncodeModal(v, 'sdr');
+      openEncodeModal(rec, 'sdr');
     } else if (action === 'delete') {
-      if (!confirm(`Delete "${v.name}"?\n\nThis cannot be undone.`)) return;
+      if (!confirm(`Delete "${rec.name}"?\n\nThis cannot be undone.`)) return;
       api.watchFolder('');
-      thumbCache.delete(v.fullPath);
-      if (currentClip?.fullPath === v.fullPath) { closeModal(); }
+      thumbCache.delete(rec.fullPath);
+      if (currentClip?.fullPath === rec.fullPath) { closeModal(); }
       await new Promise(r => setTimeout(r, 500));
-      const result = await api.deleteFile(v.fullPath);
+      const result = await api.deleteFile(rec.fullPath);
       if (result.success) {
-        showToast(`✓ Deleted ${v.name}`, 'success');
+        showToast(`✓ Deleted ${rec.name}`, 'success');
         await scanAndRender();
       } else {
         startWatching(rootFolder);
@@ -507,8 +539,8 @@ function makeCard(v) {
   thumbEl.addEventListener('mouseleave', stopHoverPreview);
 
   // Click card body = open modal
-  card.querySelector('.vid-card-body').addEventListener('click', () => openModal(v));
-  card.querySelector('.vid-thumb').addEventListener('click', () => openModal(v));
+  card.querySelector('.vid-card-body').addEventListener('click', () => openModal(card._video || v));
+  card.querySelector('.vid-thumb').addEventListener('click', () => openModal(card._video || v));
 
   // Menu button
   card.querySelector('.vid-menu-btn').addEventListener('click', e => {
@@ -1316,9 +1348,9 @@ async function runEncodeJob(saveMode) {
   }
 
   if (result.success) {
-    // Both caches key on path; a replace reuses the path with entirely new content.
-    thumbCache.delete(clip.fullPath);
-    metaCache.delete(clip.fullPath);
+    // Cache invalidation belongs to syncGrid, which can tell whether this clip's file
+    // actually changed — dropping it here would also throw away a save-as-new source's
+    // still and metadata, which are still perfectly good.
     const saved = clip.size - result.size;
     const pct = Math.round((result.size / clip.size) * 100);
     showToast(
@@ -1885,9 +1917,6 @@ async function runExport(clip, meta, preset) {
     return;
   }
 
-  // Both caches key on path, and a replace reuses the path with new content.
-  thumbCache.delete(clip.fullPath);
-  metaCache.delete(clip.fullPath);
   api.openInExplorer(result.outputPath);
 
   const name = result.outputPath.split('\\').pop();

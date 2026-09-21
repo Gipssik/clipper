@@ -229,5 +229,8 @@ Any format ffmpeg supports: `.mp4`, `.mov`, `.avi`, `.mkv`, `.webm`, `.wmv`, `.f
   left alone.
 - Tone mapping is one-way. The SDR copy cannot be turned back into HDR, so keep the original if you still
   want the HDR version.
+- A card is rebuilt when the file behind it changes, not just when it appears or disappears. Replacing a
+  clip in place refreshes its badges, still, size and menu — and so does an edit made outside Clipper,
+  since the folder watcher triggers the same rescan.
 - **Export** never re-encodes to reach a state the clip is already in. Repackaging a container and copying
   a file are both lossless; only an actual picture change costs quality.

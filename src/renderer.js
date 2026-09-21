@@ -136,11 +136,16 @@ function codecLabel(codec) {
 
 function applyBadges(cardEl, meta) {
   const isAv1 = meta && meta.videoCodec === 'av1';
+  const isHdr = !!(meta && meta.isHdr);
 
   // Converting is only offered for AV1 — for anything else it would just be a
   // lossy round-trip with nothing gained, so the entry stays hidden.
   const convertItem = cardEl.querySelector('[data-action="convert"]');
   if (convertItem) convertItem.style.display = isAv1 ? '' : 'none';
+
+  // Same idea for tone mapping: pointless on footage that is already SDR.
+  const sdrItem = cardEl.querySelector('[data-action="sdr"]');
+  if (sdrItem) sdrItem.style.display = isHdr ? '' : 'none';
 
   const wrap = cardEl.querySelector('.vid-badges');
   if (!wrap) return;
@@ -151,6 +156,7 @@ function applyBadges(cardEl, meta) {
   const cls = short >= 1080 ? 'res-high' : short <= 480 ? 'res-low' : '';
   let html = `<span class="q-badge ${cls}">${label}</span>`;
   if (isAv1) html += '<span class="q-badge codec-av1">AV1</span>';
+  if (isHdr) html += `<span class="q-badge hdr">${meta.hdrFormat === 'hlg' ? 'HLG' : 'HDR'}</span>`;
   wrap.innerHTML = html;
 }
 
@@ -402,6 +408,10 @@ function makeCard(v) {
       <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.5h7L7 2.5M10 7.5H3l2 2"/></svg>
       Convert to MP4…
     </div>
+    <div class="vid-dropdown-item" data-action="sdr" style="display:none">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2"><circle cx="6" cy="6" r="4.2"/><path d="M6 1.8v8.4" stroke-linecap="round"/><path d="M6 1.8a4.2 4.2 0 010 8.4z" fill="currentColor" stroke="none"/></svg>
+      Convert HDR → SDR…
+    </div>
     <div class="vid-dropdown-sep"></div>
     <div class="vid-dropdown-item danger" data-action="delete">
       <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 3h8M5 3V2h2v1M5 5v4M7 5v4M3 3l.5 7h5l.5-7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -417,6 +427,8 @@ function makeCard(v) {
       openEncodeModal(v, 'compress');
     } else if (action === 'convert') {
       openEncodeModal(v, 'convert');
+    } else if (action === 'sdr') {
+      openEncodeModal(v, 'sdr');
     } else if (action === 'delete') {
       if (!confirm(`Delete "${v.name}"?\n\nThis cannot be undone.`)) return;
       api.watchFolder('');
@@ -781,6 +793,10 @@ const crfValue        = document.getElementById('crf-value');
 const crfTip          = document.getElementById('crf-tip');
 const bitrateField    = document.getElementById('bitrate-field');
 const bitrateInput    = document.getElementById('bitrate-input');
+const tonemapField    = document.getElementById('tonemap-field');
+const tonemapSeg      = document.getElementById('tonemap-seg');
+const tonemapValue    = document.getElementById('tonemap-value');
+const tonemapTip      = document.getElementById('tonemap-tip');
 const fpsSelect       = document.getElementById('fps-select');
 const audioSelect     = document.getElementById('audio-select');
 const encoderSelect   = document.getElementById('encoder-select');
@@ -800,6 +816,7 @@ let encodeClip   = null;   // the clip the modal is acting on
 let encodeMeta   = null;   // its probed stream metadata
 let encodeKind   = 'compress';
 let encoderList  = null;   // { software: [...], hardware: [...] } — probed once
+let filterCaps   = null;   // { zscale, tonemap } — whether this ffmpeg can tone map
 
 const RES_LADDER = [1440, 1080, 720, 480];
 const SPEED_NAMES = ['Ultra fast', 'Super fast', 'Very fast', 'Faster', 'Fast', 'Medium', 'Slow', 'Slower'];
@@ -815,6 +832,7 @@ const enc = {
   audio: 'copy',
   encoder: 'libx264',
   speed: 5,
+  toneMap: null,      // null = leave the source's dynamic range alone
 };
 
 // ── Quality descriptors ───────────────────────────────────────────────────────
@@ -837,6 +855,45 @@ function crfTipText(crf, family) {
   if (crf <= 27) return 'Clearly smaller. Fine for sharing and watching; fast motion and fine textures start to smear.' + scaleNote;
   if (crf <= 30) return 'Small files, but softness and banding are visible — especially in dark scenes and smoke.' + scaleNote;
   return 'Aggressive. Expect blocking in any busy scene. Use only when size matters more than looks.' + scaleNote;
+}
+
+// ── HDR ───────────────────────────────────────────────────────────────────────
+const TONEMAP_NAMES = {
+  balanced: 'Balanced',
+  filmic:   'Filmic',
+  punchy:   'Punchy',
+};
+
+function tonemapTipText(op, hdrFormat) {
+  const curve = hdrFormat === 'hlg' ? 'HLG' : 'HDR10 (PQ)';
+  if (!op) {
+    return `The clip stays ${curve}. It will look right on an HDR display and washed-out, grey `
+         + `and flat on everything else — which is what happens when you send it to someone.`;
+  }
+  const lead = `Remaps the ${curve} picture into normal SDR colour so it looks the same everywhere. `;
+  if (op === 'filmic') return lead + 'Filmic S-curve that protects detail in skies, explosions and muzzle flashes. It darkens the whole picture though, so dark scenes can come out murky.';
+  if (op === 'punchy') return lead + 'Leaves everything below SDR white exactly as graded and hard-clips above it. Most contrast, but the brightest highlights lose all detail.';
+  return lead + 'Holds midtone brightness close to the original and only rolls off the top highlights — the closest match to how the game actually looked. Start here.';
+}
+
+function refreshToneMapUi() {
+  const m = encodeMeta;
+  const isHdr = !!m?.isHdr;
+  tonemapField.style.display = isHdr ? '' : 'none';
+  if (!isHdr) return;
+
+  // No zscale means no honest tone mapping, so say so instead of offering a broken button.
+  const usable = filterCaps ? filterCaps.zscale : true;
+  [...tonemapSeg.children].forEach(b => {
+    const op = b.dataset.tonemap || null;
+    b.disabled = !usable && op !== null;
+    b.classList.toggle('active', op === enc.toneMap);
+  });
+
+  tonemapValue.textContent = enc.toneMap ? TONEMAP_NAMES[enc.toneMap] : 'Keep HDR';
+  tonemapTip.textContent = usable
+    ? tonemapTipText(enc.toneMap, m.hdrFormat)
+    : 'This ffmpeg build has no zscale filter, so it cannot tone map. Drop a full ffmpeg build into ffmpeg-bin/ to enable it.';
 }
 
 function encoderFamily(id) {
@@ -960,8 +1017,9 @@ function availableEncoders() {
   const hw = encoderList?.hardware ?? [];
   const sw = encoderList?.software ?? [{ id: 'libx264', family: 'h264', vendor: 'CPU (x264)' }];
   const all = [...hw, ...sw];
-  // Convert exists to produce H.264 — offering H.265 here would defeat the point.
-  return encodeKind === 'convert' ? all.filter(e => e.family === 'h264') : all;
+  // Convert and HDR→SDR both exist to produce something a friend can just open,
+  // so they pin the output to H.264 — offering H.265 would defeat the point.
+  return encodeKind === 'compress' ? all : all.filter(e => e.family === 'h264');
 }
 
 function buildEncoderSelect() {
@@ -1023,7 +1081,9 @@ async function openEncodeModal(clip, kind) {
   encodeKind = kind;
   encodeMeta = metaCache.get(clip.fullPath) || null;
 
-  encodeTitle.textContent = kind === 'convert' ? 'Convert to MP4' : 'Compress';
+  encodeTitle.textContent = kind === 'convert' ? 'Convert to MP4'
+                          : kind === 'sdr'     ? 'Convert HDR → SDR'
+                          : 'Compress';
   encodeSubject.textContent = clip.name;
   encodeOverlay.classList.add('open');
 
@@ -1033,7 +1093,10 @@ async function openEncodeModal(clip, kind) {
   estSize.textContent = '…';
   estDelta.textContent = '';
 
+  tonemapField.style.display = 'none';
+
   if (!encoderList) encoderList = await api.getEncoders();
+  if (!filterCaps)  filterCaps  = await api.getFilters();
   if (!encodeMeta) {
     const m = await api.probeVideo(clip.fullPath);
     if (m) { encodeMeta = m; metaCache.set(clip.fullPath, m); applyBadgesFor(clip.fullPath); }
@@ -1044,6 +1107,7 @@ async function openEncodeModal(clip, kind) {
   fillSourceCells();
   buildResSegment();
   buildEncoderSelect();
+  refreshToneMapUi();
   refreshQualityUi();
   syncBitrateDefault();
   updateEstimate();
@@ -1064,14 +1128,25 @@ function applyKindDefaults() {
   audioSelect.value = 'copy';
   speedSlider.value = 5;
 
-  if (encodeKind === 'convert') {
-    // Conversion is about playability, not shrinking — keep the picture as-is and
+  // Tone mapping is only ever on the table for HDR sources, and when it is, leaving it
+  // off is almost certainly not what the user wants — an untouched HDR clip is the grey
+  // one. Default it on for every kind, including a plain Compress.
+  const canToneMap = !!m?.isHdr && (filterCaps ? filterCaps.zscale : true);
+  enc.toneMap = canToneMap ? 'balanced' : null;
+
+  if (encodeKind === 'convert' || encodeKind === 'sdr') {
+    // Both of these are about playability, not shrinking — keep the picture as-is and
     // pin the output to H.264 so the result opens in anything.
     enc.targetHeight = null;
     enc.crf = 20;
 
     const codec = m?.videoCodec ? codecLabel(m.videoCodec) : 'this codec';
-    if (m?.videoCodec === 'av1') {
+    if (encodeKind === 'sdr') {
+      const curve = m?.hdrFormat === 'hlg' ? 'HLG' : 'HDR10';
+      setEncodeNote(canToneMap
+        ? `This clip is <strong>${curve}</strong>. Its colours are graded for an HDR display, which is why it looks <em>grey and washed out</em> anywhere else. It will be tone mapped down to normal <strong>SDR</strong> and re-encoded to <strong>H.264 in an .mp4</strong> — the result looks the same on every screen. This is a one-way conversion; keep the original if you still want the HDR version.`
+        : `This clip is <strong>${curve}</strong>, but this ffmpeg build cannot tone map — see below. Encoding it now would produce the same washed-out picture, just in a different file.`);
+    } else if (m?.videoCodec === 'av1') {
       setEncodeNote(`This clip is <strong>AV1</strong>. It will be decoded and re-encoded to <strong>H.264 in an .mp4</strong>, which every editor, player and upload target accepts. Expect a somewhat <em>larger</em> file than the AV1 original — that is the cost of compatibility.`);
     } else {
       setEncodeNote(`This clip is <strong>${codec}</strong>. It will be re-encoded to <strong>H.264 in an .mp4</strong> for maximum compatibility.`);
@@ -1080,7 +1155,9 @@ function applyKindDefaults() {
     // Compress opens one rung below the source so the default already does something.
     enc.targetHeight = srcShort ? (RES_LADDER.find(h => h < srcShort) ?? null) : null;
     enc.crf = 23;
-    setEncodeNote('');
+    setEncodeNote(canToneMap
+      ? `This clip is <strong>HDR</strong>. Compressing it to 8-bit without tone mapping is what leaves it looking grey, so <strong>HDR → SDR</strong> is switched on below. Turn it off to keep the HDR grade.`
+      : '');
   }
   crfSlider.value = enc.crf;
 }
@@ -1096,6 +1173,13 @@ encodeCloseBtn.addEventListener('click', closeEncodeModal);
 encodeOverlay.addEventListener('click', e => { if (e.target === encodeOverlay) closeEncodeModal(); });
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && encodeOverlay.classList.contains('open')) closeEncodeModal();
+});
+
+tonemapSeg.addEventListener('click', e => {
+  const btn = e.target.closest('[data-tonemap]');
+  if (!btn || btn.disabled) return;
+  enc.toneMap = btn.dataset.tonemap || null;
+  refreshToneMapUi();
 });
 
 rateSeg.addEventListener('click', e => {
@@ -1158,9 +1242,11 @@ encodeReplace.addEventListener('click', () => {
 
 // ── Running the job ───────────────────────────────────────────────────────────
 function encodeSuffix() {
+  if (encodeKind === 'sdr') return '_sdr';
   if (encodeKind === 'convert') return '_h264';
   const dims = outputDims();
-  return dims ? '_' + Math.min(dims.w, dims.h) + 'p' : '_compressed';
+  const base = dims ? '_' + Math.min(dims.w, dims.h) + 'p' : '_compressed';
+  return enc.toneMap ? base + '_sdr' : base;
 }
 
 async function runEncodeJob(saveMode) {
@@ -1168,11 +1254,14 @@ async function runEncodeJob(saveMode) {
   const clip = encodeClip;
   const kind = encodeKind;
   const suffix = encodeSuffix();   // depends on encodeMeta, which closing the modal clears
+  const toneMap = enc.toneMap;
 
   closeEncodeModal();
   api.watchFolder('');
 
-  progTitle.textContent = kind === 'convert' ? 'Converting…' : 'Compressing…';
+  progTitle.textContent = kind === 'sdr' ? 'Converting to SDR…'
+                        : kind === 'convert' ? 'Converting…'
+                        : 'Compressing…';
   progSub.textContent = 'Starting ffmpeg';
   progBar.style.width = '0%';
   progBarWrap.classList.add('show');
@@ -1191,6 +1280,7 @@ async function runEncodeJob(saveMode) {
     bitrateKbps: enc.bitrateKbps,
     targetHeight: enc.targetHeight,
     targetFps: enc.fps,
+    toneMap,
     audioMode: enc.audio === 'none' ? 'none' : enc.audio === 'copy' ? 'copy' : 'encode',
     audioKbps: enc.audio === 'copy' || enc.audio === 'none' ? 160 : parseInt(enc.audio),
   });

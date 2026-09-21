@@ -429,6 +429,7 @@
   .q-badge.res-high  { border-color: rgba(232,255,71,0.45); color: var(--accent); }
   .q-badge.res-low   { border-color: rgba(255,255,255,0.14); color: var(--text2); }
   .q-badge.codec-av1 { border-color: rgba(82,255,176,0.45); color: var(--success); }
+  .q-badge.hdr       { border-color: rgba(255,176,82,0.5);  color: #ffb052; }
   .q-badge.pending   { opacity: 0.35; }
 
   /* ── Encode modal ── */
@@ -820,6 +821,18 @@
       </div>
 
       <div id="encode-note"></div>
+
+      <!-- HDR tone mapping (only shown for HDR sources) -->
+      <div class="enc-field" id="tonemap-field" style="display:none">
+        <div class="enc-label"><span>HDR → SDR</span><span class="enc-value" id="tonemap-value"></span></div>
+        <div class="enc-seg" id="tonemap-seg">
+          <button data-tonemap="">Keep HDR</button>
+          <button data-tonemap="balanced" class="active">Balanced</button>
+          <button data-tonemap="filmic">Filmic</button>
+          <button data-tonemap="punchy">Punchy</button>
+        </div>
+        <div class="enc-tip" id="tonemap-tip"></div>
+      </div>
 
       <!-- Resolution -->
       <div class="enc-field">

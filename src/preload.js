@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('api', {
   deleteFile:     (fp)        => ipcRenderer.invoke('file:delete', fp),
   probeVideo:     (fp)        => ipcRenderer.invoke('video:probe', fp),
   getEncoders:    ()          => ipcRenderer.invoke('encode:encoders'),
+  getFilters:     ()          => ipcRenderer.invoke('encode:filters'),
   encodeVideo:    (opts)      => ipcRenderer.invoke('video:encode', opts),
   cancelEncode:   ()          => ipcRenderer.invoke('encode:cancel'),
   onEncodeProgress: (cb)      => ipcRenderer.on('encode:progress', (_, p) => cb(p)),

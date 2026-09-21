@@ -85,7 +85,7 @@ npm run build-portable
 
 Each card shows a **quality badge** in the corner of its thumbnail — `1080p60`, `720p`, `4K` and so on,
 named after the clip's short side so portrait clips read correctly too. Clips encoded with AV1 get an
-extra green **AV1** badge.
+extra green **AV1** badge, and HDR clips get an orange **HDR** (or **HLG**) one.
 
 ---
 
@@ -112,7 +112,32 @@ would be a lossy round-trip with nothing gained. It decodes the source and re-en
 .mp4**, which every editor, player and upload target accepts. AV1 clips usually get *larger* — that is the
 cost of compatibility, and the modal says so up front.
 
-Both actions offer **Save as new** (writes `clip_720p.mp4` / `clip_h264.mp4` next to the original) and
+## Converting HDR → SDR
+
+Game capture on an HDR display records the clip in HDR, graded against a PQ or HLG curve and the wide
+bt2020 gamut. Anything that is not an HDR screen ignores that grading and shows the raw values, which is
+why the clip looks **grey, flat and washed out** the moment you send it to a friend. Re-encoding alone
+does not fix it — the picture has to be converted.
+
+**Convert HDR → SDR…** appears in the **⋮** menu for clips that are actually HDR. It takes the picture
+back to linear light, maps the bt2020 gamut to bt709, compresses the brightness into SDR range and
+re-encodes to **H.264 in an .mp4**, correctly tagged bt709 so nothing downstream second-guesses it.
+
+Four options, each with a note on what it costs:
+
+| Mode | What it does |
+| --- | --- |
+| **Keep HDR** | Leaves the dynamic range alone. The output stays HDR — and stays grey on SDR screens. |
+| **Balanced** | Holds midtone brightness close to the original and only rolls off the top highlights. The closest match to how the game looked, and the default. |
+| **Filmic** | Filmic S-curve that protects detail in skies, explosions and muzzle flashes, at the cost of darkening the whole picture. |
+| **Punchy** | Leaves everything below SDR white exactly as graded and hard-clips above it. Most contrast, no highlight detail. |
+
+The same control appears in **Compress** whenever the source is HDR, switched on by default — compressing
+an HDR clip to 8-bit without tone mapping is exactly what produces the washed-out result. Tone mapping
+needs an ffmpeg with the `zscale` filter (libzimg); builds without it say so instead of offering the
+option.
+
+All three actions offer **Save as new** (writes `clip_720p.mp4` / `clip_h264.mp4` / `clip_sdr.mp4` next to the original) and
 **Replace original** (keeps the original's name; if the container changes, the old file is removed).
 Long encodes show a progress bar with speed and time remaining, and can be cancelled — a cancelled run
 leaves nothing behind.
@@ -148,3 +173,8 @@ Any format ffmpeg supports: `.mp4`, `.mov`, `.avi`, `.mkv`, `.webm`, `.wmv`, `.f
   x264 but produces somewhat larger files at the same quality setting.
 - Clipper probes for usable hardware encoders at startup by running a throwaway one-frame encode, so the
   list only offers encoders this machine can actually use.
+- HDR detection reads the clip's transfer curve (`smpte2084` for HDR10, `arib-std-b67` for HLG), not just
+  its bit depth or gamut — a 10-bit bt2020 clip with an ordinary curve is wide-gamut, not HDR, and is
+  left alone.
+- Tone mapping is one-way. The SDR copy cannot be turned back into HDR, so keep the original if you still
+  want the HDR version.

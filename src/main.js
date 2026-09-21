@@ -234,6 +234,7 @@ ipcMain.handle('video:thumbnail', async (_, { filePath, time }) => {
 
 ipcMain.handle('video:probe', async (_, filePath) => probeFile(filePath));
 ipcMain.handle('encode:encoders', async () => detectEncoders());
+ipcMain.handle('encode:filters', async () => detectFilters());
 ipcMain.handle('encode:cancel', () => {
   if (activeEncode) {
     encodeCancelled = true;
@@ -250,18 +251,64 @@ ipcMain.handle('window:close', () => mainWindow.close());
 // ── Probing ───────────────────────────────────────────────────────────────────
 // ffmpeg (not ffprobe) is the only binary we ship, so metadata comes from parsing
 // the stream banner it writes to stderr for every input it opens.
+
+// The pixel format and its colour tags sit immediately before the frame size on the
+// Stream line: "..., yuv420p10le(tv, bt2020nc/bt2020/smpte2084), 3840x2160". Anchoring
+// on the dimensions is what stops a codec profile or fourcc from matching first.
+const COLOR_RANGES = new Set(['tv', 'pc', 'limited', 'full', 'unknown']);
+
+function parseColorInfo(videoPart, meta) {
+  const m = videoPart.match(/,\s*([a-z0-9]+)\s*(?:\(([^)]*)\))?\s*,\s*\d{2,5}x\d{2,5}/);
+  if (!m) return;
+  meta.pixFmt = m[1];
+
+  if (/10(le|be)$/.test(m[1]) || m[1] === 'p010') meta.bitDepth = 10;
+  else if (/12(le|be)$/.test(m[1])) meta.bitDepth = 12;
+  else if (/16(le|be)$/.test(m[1])) meta.bitDepth = 16;
+  else meta.bitDepth = 8;
+
+  for (const raw of (m[2] || '').split(',')) {
+    const part = raw.trim();
+    if (!part || part === 'progressive') continue;
+    if (COLOR_RANGES.has(part)) { meta.colorRange = part; continue; }
+    if (part.includes('/')) {
+      // matrix/primaries/transfer, with "unknown" standing in for anything untagged.
+      const [mx, pr, tr] = part.split('/').map(x => x.trim());
+      if (mx && mx !== 'unknown') meta.colorMatrix = mx;
+      if (pr && pr !== 'unknown') meta.colorPrimaries = pr;
+      if (tr && tr !== 'unknown') meta.colorTransfer = tr;
+    } else if (/^[a-z0-9+._-]+$/.test(part)) {
+      // ffmpeg collapses the triplet to a single token when all three agree.
+      meta.colorMatrix = meta.colorPrimaries = meta.colorTransfer = part;
+    }
+  }
+
+  // The transfer curve is what actually makes a clip look washed out on an SDR screen —
+  // bt2020 primaries on their own are a wide gamut, not HDR.
+  if (meta.colorTransfer === 'smpte2084')         meta.hdrFormat = 'pq';
+  else if (meta.colorTransfer === 'arib-std-b67') meta.hdrFormat = 'hlg';
+  else if (meta.hasDolbyVision)                   meta.hdrFormat = 'pq';
+  meta.isHdr = meta.hdrFormat !== null;
+}
+
 function parseProbe(stderr) {
   if (!stderr) return null;
   const meta = {
     durationSec: null, totalKbps: null,
     width: null, height: null, videoCodec: null, fps: null, videoKbps: null,
     audioCodec: null, audioKbps: null, audioChannels: null, hasAudio: false,
+    pixFmt: null, bitDepth: null, colorRange: null,
+    colorMatrix: null, colorPrimaries: null, colorTransfer: null,
+    isHdr: false, hdrFormat: null, hasDolbyVision: false,
   };
 
   const dur = stderr.match(/Duration:\s*(\d+):(\d+):(\d+\.?\d*)/);
   if (dur) meta.durationSec = +dur[1] * 3600 + +dur[2] * 60 + parseFloat(dur[3]);
   const total = stderr.match(/Duration:[^\n]*?bitrate:\s*(\d+)\s*kb\/s/);
   if (total) meta.totalKbps = parseInt(total[1]);
+
+  // A Dolby Vision layer is printed as stream side data, not on the Stream line itself.
+  meta.hasDolbyVision = /DOVI configuration record/i.test(stderr);
 
   for (const line of stderr.split(/\r?\n/)) {
     if (!/^\s*Stream #\d+:\d+/.test(line)) continue;
@@ -270,8 +317,10 @@ function parseProbe(stderr) {
       const codec = line.match(/:\s*Video:\s*([a-zA-Z0-9_]+)/);
       if (codec) meta.videoCodec = codec[1].toLowerCase();
       // Read dimensions from after the codec tag so a fourcc like 0x31637661 can't match.
-      const dims = line.slice(line.indexOf('Video:')).match(/\b(\d{2,5})x(\d{2,5})\b/);
+      const videoPart = line.slice(line.indexOf('Video:'));
+      const dims = videoPart.match(/\b(\d{2,5})x(\d{2,5})\b/);
       if (dims) { meta.width = parseInt(dims[1]); meta.height = parseInt(dims[2]); }
+      parseColorInfo(videoPart, meta);
       const fps = line.match(/([\d.]+)\s*fps/);
       if (fps) meta.fps = parseFloat(fps[1]);
       const br = line.match(/,\s*(\d+)\s*kb\/s/);
@@ -333,6 +382,26 @@ function testEncoder(id) {
   });
 }
 
+// Tone mapping leans on zscale (libzimg), which plenty of ffmpeg builds ship without.
+// Ask the binary we are actually going to run rather than assuming the bundled one.
+let filterProbe = null;
+
+function detectFilters() {
+  if (filterProbe) return filterProbe;
+  filterProbe = new Promise(resolve => {
+    const proc = spawn(getFfmpegPath(), ['-hide_banner', '-filters'], { windowsHide: true });
+    let out = '';
+    proc.stdout.on('data', d => out += d.toString());
+    const done = () => resolve({
+      zscale:  /\bzscale\b/.test(out),
+      tonemap: /^\s*\S+\s+tonemap\s/m.test(out),
+    });
+    proc.on('close', done);
+    proc.on('error', () => resolve({ zscale: false, tonemap: false }));
+  });
+  return filterProbe;
+}
+
 function detectEncoders() {
   if (encoderProbe) return encoderProbe;
   encoderProbe = (async () => {
@@ -379,6 +448,31 @@ function rateControlArgs(encoder, mode, crf, kbps) {
   return ['-crf', String(q)];
 }
 
+// HDR footage is graded against a PQ/HLG curve and the bt2020 gamut. Handing those
+// values to an SDR player unchanged is exactly what makes a clip look flat and grey,
+// so the picture has to be taken back to linear light, compressed into SDR's range,
+// and re-encoded against bt709 — a conversion, not a tag change.
+const TONEMAP_OPERATORS = {
+  balanced: 'mobius:param=0.3:desat=0',
+  filmic:   'hable:desat=0',
+  punchy:   'clip:desat=0',
+};
+
+function tonemapFilters(op, hdrFormat) {
+  const operator = TONEMAP_OPERATORS[op] || TONEMAP_OPERATORS.balanced;
+  // Force the input curve from what we probed: untagged-but-HDR files exist, and
+  // zscale would otherwise guess bt709 and leave the picture untouched.
+  const tin = hdrFormat === 'hlg' ? 'arib-std-b67' : 'smpte2084';
+  return [
+    `zscale=tin=${tin}:pin=bt2020:min=bt2020nc:t=linear:npl=100`,
+    'format=gbrpf32le',          // tonemap works in linear float RGB
+    'zscale=p=bt709',            // gamut first, so the operator only handles brightness
+    `tonemap=tonemap=${operator}`,
+    'zscale=t=bt709:m=bt709:r=tv',
+    'format=yuv420p',
+  ];
+}
+
 function uniquePath(dir, base, ext) {
   let candidate = path.join(dir, base + ext);
   let i = 1;
@@ -390,6 +484,7 @@ function uniquePath(dir, base, ext) {
  * opts: { inputPath, saveMode:'new'|'replace', suffix, container:'mp4',
  *         encoder, speed, rateMode:'crf'|'bitrate', crf, bitrateKbps,
  *         targetHeight|null, targetFps|null,
+ *         toneMap: null|'balanced'|'filmic'|'punchy',
  *         audioMode:'copy'|'encode'|'none', audioKbps }
  */
 async function runEncode(opts, sender) {
@@ -427,6 +522,10 @@ async function runEncode(opts, sender) {
   }
   if (opts.targetFps)    vf.push('fps=' + opts.targetFps);
 
+  // Scale first: tone mapping is the expensive filter, so give it fewer pixels to chew on.
+  const toneMapping = !!opts.toneMap && (await detectFilters()).zscale;
+  if (toneMapping) vf.push(...tonemapFilters(opts.toneMap, src && src.hdrFormat));
+
   args.push('-map', '0:v:0');
   if (opts.audioMode === 'none') args.push('-an');
   else args.push('-map', '0:a:0?');
@@ -437,6 +536,12 @@ async function runEncode(opts, sender) {
   args.push(...rateControlArgs(opts.encoder, opts.rateMode, opts.crf, opts.bitrateKbps));
   args.push(...presetArgs(opts.encoder, opts.speed));
   args.push('-pix_fmt', 'yuv420p');
+
+  // ffmpeg copies the source's colour tags onto the output by default, which would
+  // leave a tone-mapped file still claiming to be HDR. Re-tag it as plain bt709.
+  if (toneMapping) {
+    args.push('-color_primaries', 'bt709', '-color_trc', 'bt709', '-colorspace', 'bt709');
+  }
 
   if (opts.audioMode !== 'none') {
     // Stream-copying audio into MP4 only works for codecs MP4 players actually accept.
@@ -530,4 +635,4 @@ async function runEncode(opts, sender) {
 }
 
 // Warm the encoder probe early so the modal never has to wait on it.
-app.whenReady().then(() => { detectEncoders(); });
+app.whenReady().then(() => { detectEncoders(); detectFilters(); });

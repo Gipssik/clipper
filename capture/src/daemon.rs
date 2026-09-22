@@ -761,6 +761,20 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
                         key.is_ok(),
                     ));
                 }
+                // The settings panel cannot capture Alt+F-key itself — Windows eats those above
+                // every layer Electron can reach — so it asks the daemon, which can install a
+                // low-level hook. See hotkey.rs.
+                Command::Listen => {
+                    let reply = emitter.clone();
+                    hotkey::listen(std::time::Duration::from_secs(15), move |spec| {
+                        if let Some(reply) = reply {
+                            reply.emit(&serde_json::json!({
+                                "event": "hotkey-captured",
+                                "spec": spec,
+                            }));
+                        }
+                    });
+                }
                 Command::Unknown(what) => {
                     emit(serde_json::json!({ "event": "error", "message": format!("unknown command: {what}") }));
                 }

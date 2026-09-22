@@ -269,6 +269,13 @@ losing the last minute of footage to a slider is a bad trade.
 orphan quietly writing to your disk. In Task Manager it appears nested under Clipper as *Clipper
 Instant Replay*.
 
+**Any combination, and it tells you if it is taken.** Press **Change** and then the keys you want —
+including the ones a settings window normally cannot see, like `Alt+F10`, because the recorder does
+the listening rather than the app window. Windows hands out a global hotkey to one program at a
+time, so if something else already holds the combination the field says so outright instead of
+quietly never firing. NVIDIA's overlay holds `Alt+F9` and `Alt+F10` on most gaming machines; Steam,
+Discord and Xbox Game Bar each claim a few more.
+
 > **One known limitation, with no fix from user space:** Windows never delivers a hotkey to an
 > ordinary program while something running as administrator has focus. A game launched elevated, or
 > one whose anti-cheat runs elevated, will swallow the combination silently. Running Clipper as

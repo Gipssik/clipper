@@ -105,6 +105,30 @@ the `args` you pass in, and Electron drops `--hidden` from the args it parses ba
 registry. The comparison therefore always fails: the entry is written correctly and launches the app
 every morning, while the switch in Settings reads off.
 
+**The hotkey is chosen by the daemon, not the settings panel.** Windows consumes Alt+F-key above
+every layer Electron can reach, and this was measured rather than guessed: pressing Alt+F10 over
+Clipper's window delivers the Alt and then nothing at all — the F10 reaches neither the DOM, nor
+`before-input-event`, nor `WM_SYSKEYDOWN` via `hookWindowMessage`. `Alt+G`, `F10` alone and
+`Alt+Shift+F8` all arrive normally, so the hole is specifically Alt plus a function key. There is
+no fix on the Electron side; do not go looking for one again.
+
+So `replayHotkeyBtn` sends `listen` down the pipe and the daemon installs a `WH_KEYBOARD_LL` hook
+(`hotkey.rs`), which runs ahead of all that, and replies with a `hotkey-captured` event. The window
+keeps a keydown handler as the fallback for when the daemon is not up; it gets everything except
+Alt+F-key. The hook swallows what it captures, so choosing a hotkey cannot also trigger it. Alt+F4
+alone is declined on purpose — `RegisterHotKey` would grant it and take the one shortcut everybody
+knows away from every window on the machine.
+
+`parse()` and `key_name()` in `hotkey.rs` are inverses over a shared `NAMED` table and there is a
+test that says so; a key the daemon can capture must be one it can register.
+
+**A hotkey that cannot be registered has to say so.** Windows gives a global hotkey to one process
+at a time, so a combination another program holds is refused outright — Alt+F9 and Alt+F10 belong
+to NVIDIA's overlay on a typical gaming machine. The daemon reports this as `hotkeyOk` on every
+status, and the panel shows a persistent warning under the field. It is deliberately not a toast:
+the setting reads back exactly as the user chose it, so the only clue something is wrong is the one
+the field carries.
+
 **Voice.** Every control carries a one-line tip explaining what moving it does to the picture, and
 what it costs. Match that when adding UI; a bare label is out of place here.
 

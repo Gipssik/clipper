@@ -530,6 +530,13 @@
   .enc-label .enc-value { font-size: calc(12.5px * var(--font-scale)); color: var(--accent); letter-spacing: 0; text-transform: none; font-weight: 700; }
   .enc-tip { font-size: calc(12px * var(--font-scale)); line-height: 1.6; color: var(--text2); margin-top: 8px; }
   .enc-tip strong { color: var(--text); font-weight: 700; }
+  /* A condition that persists, rather than a toast that says it once and goes. Used for a hotkey
+     Windows would not give us — the setting looks fine, so the field has to say otherwise. */
+  .enc-warn {
+    font-size: calc(12px * var(--font-scale)); line-height: 1.6; margin-top: 8px;
+    padding: 8px 11px; border-radius: 6px; color: #e0a33e;
+    background: rgba(224, 163, 62, 0.08); border: 1px solid rgba(224, 163, 62, 0.3);
+  }
 
   /* Segmented control */
   .enc-seg { display: flex; gap: 7px; flex-wrap: wrap; }
@@ -1196,6 +1203,7 @@
                 <button id="replay-hotkey-btn">Change</button>
               </div>
               <div class="enc-tip">Saves the buffer wherever you are. A game running as administrator will swallow it — Windows does not deliver hotkeys down to ordinary programs — and there is no way around that but running Clipper as administrator too.</div>
+              <div class="enc-warn" id="replay-hotkey-warn" style="display:none"></div>
             </div>
 
             <div class="enc-field">

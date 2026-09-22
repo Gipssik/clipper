@@ -42,6 +42,8 @@ pub enum Command {
     Save,
     Reload,
     Quit,
+    /// Capture the next combination the user presses and report it back.
+    Listen,
     Unknown(String),
 }
 
@@ -208,6 +210,7 @@ fn parse(line: &str) -> Command {
         Some("save") => Command::Save,
         Some("reload") => Command::Reload,
         Some("quit") => Command::Quit,
+        Some("listen") => Command::Listen,
         other => Command::Unknown(other.unwrap_or("").to_string()),
     }
 }

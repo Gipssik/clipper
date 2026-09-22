@@ -656,6 +656,11 @@ ipcMain.handle('capture:status', () => new Promise((resolve) => {
   capture.awaitingStatus = (status) => { clearTimeout(timer); resolve(status); };
 }));
 ipcMain.handle('capture:save', () => sendCapture('save'));
+// Asks the daemon to capture the next combination pressed. The settings window cannot do this
+// itself: Windows consumes Alt+F-key above every layer Electron can reach, so a keydown handler in
+// the panel never sees it. The daemon is a plain Win32 process and can install a low-level hook.
+// Returns false when the daemon is not up, which is the panel's cue to read the key itself.
+ipcMain.handle('capture:listenHotkey', () => sendCapture('listen'));
 ipcMain.handle('capture:available', () => fs.existsSync(getCapturePath()));
 
 // The daemon is the authority on what monitors exist and whether each is in HDR right now, so ask

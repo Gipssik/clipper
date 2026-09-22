@@ -1999,6 +1999,7 @@ const replayModeSeg     = document.getElementById('replay-mode-seg');
 const replayModeTip     = document.getElementById('replay-mode-tip');
 const replayHotkeyValue = document.getElementById('replay-hotkey-value');
 const replayHotkeyBtn   = document.getElementById('replay-hotkey-btn');
+const replayHotkeyWarn  = document.getElementById('replay-hotkey-warn');
 const replayPathValue   = document.getElementById('replay-path-value');
 const replayPathBtn     = document.getElementById('replay-path-btn');
 const replayPerGameSw   = document.getElementById('replay-pergame-switch');
@@ -2084,6 +2085,7 @@ function applyReplayUi() {
     : 'Always buffering while Clipper is open. Catches things outside games, and keeps a slice of your GPU busy the whole time.';
 
   replayHotkeyValue.textContent = c.hotkey;
+  renderHotkeyWarning();
   replayPathValue.textContent = c.outputPath || 'Your Videos folder';
   replayPerGameSw.classList.toggle('on', c.perGameSubfolder);
   const audio = c.audio || {};
@@ -2267,6 +2269,24 @@ function buildReplayMonitors(monitors) {
   }
 }
 
+// Whether Windows actually gave us the combination. It hands out a global hotkey to one program
+// at a time, so a combination another program already holds — Alt+F9 and Alt+F10 belong to
+// NVIDIA's overlay on a lot of machines — is refused outright. Silence there is the worst outcome:
+// the setting reads back exactly as chosen and simply never fires.
+let replayHotkeyOk = true;
+
+function renderHotkeyWarning() {
+  const on = replayConfig && replayConfig.enabled;
+  const show = on && !replayHotkeyOk;
+  replayHotkeyWarn.style.display = show ? '' : 'none';
+  if (!show) return;
+  replayHotkeyWarn.innerHTML =
+    `Windows would not give Clipper <strong>${replayConfig.hotkey}</strong> — another program ` +
+    `already holds it. Overlays are the usual culprit: NVIDIA's takes Alt+F9 and Alt+F10, and ` +
+    `Steam, Discord and Xbox Game Bar each claim a few. Pick a different combination, or turn ` +
+    `that program's own hotkey off.`;
+}
+
 function setReplayStatus(text, live, warn) {
   replayStatusText.textContent = text;
   replayStatus.classList.toggle('live', !!live);
@@ -2319,26 +2339,43 @@ replayPathBtn.addEventListener('click', async () => {
   if (folder) patchReplay({ outputPath: folder });
 });
 
-// Captures the next combination the user presses. Modifier-only presses are ignored so the label
-// does not flicker to "Ctrl" on the way to Ctrl+Alt+F12.
+// Captures the next combination the user presses.
+//
+// **The daemon does the capturing whenever it is running**, because this window cannot. Windows
+// consumes Alt+F-key as a system menu command above every layer Electron can reach: pressing
+// Alt+F10 here delivers the Alt and then nothing — no keydown, no before-input-event, not even
+// WM_SYSKEYDOWN. The daemon can install a low-level keyboard hook, which runs ahead of all of
+// that, so it reads the combination and sends it back as a `hotkey-captured` event.
+//
+// The handler below is the fallback for when the daemon is not up. It gets everything except the
+// Alt+F-key combinations, which is the best this side can do.
 let replayListening = false;
-replayHotkeyBtn.addEventListener('click', () => {
-  replayListening = !replayListening;
-  replayHotkeyBtn.classList.toggle('listening', replayListening);
-  replayHotkeyBtn.textContent = replayListening ? 'Press keys…' : 'Change';
+let hotkeyFromDaemon = false;
+
+function setHotkeyListening(on) {
+  replayListening = on;
+  replayHotkeyBtn.classList.toggle('listening', on);
+  replayHotkeyBtn.textContent = on ? 'Press keys…' : 'Change';
+  if (!on) hotkeyFromDaemon = false;
+}
+
+replayHotkeyBtn.addEventListener('click', async () => {
+  if (replayListening) { setHotkeyListening(false); return; }
+  setHotkeyListening(true);
+  hotkeyFromDaemon = !!(await api.captureListenHotkey());
 });
 
 window.addEventListener('keydown', (e) => {
   if (!replayListening) return;
+  // The hook swallows the key, so nothing should arrive here at all while the daemon listens.
+  // If something does, it is not the combination being chosen.
+  if (hotkeyFromDaemon) return;
   e.preventDefault();
   e.stopPropagation();
 
-  if (e.key === 'Escape') {
-    replayListening = false;
-    replayHotkeyBtn.classList.remove('listening');
-    replayHotkeyBtn.textContent = 'Change';
-    return;
-  }
+  if (e.key === 'Escape') { setHotkeyListening(false); return; }
+  // Modifier-only presses are ignored so the label does not flicker to "Ctrl" on the way to
+  // Ctrl+Alt+F12.
   if (['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) return;
 
   const parts = [];
@@ -2346,11 +2383,10 @@ window.addEventListener('keydown', (e) => {
   if (e.altKey) parts.push('Alt');
   if (e.shiftKey) parts.push('Shift');
   if (e.metaKey) parts.push('Win');
-  parts.push(e.key.length === 1 ? e.key.toUpperCase() : e.key);
+  // e.key is " " for the space bar, which is not a name the daemon's parser knows.
+  parts.push(e.key === ' ' ? 'Space' : e.key.length === 1 ? e.key.toUpperCase() : e.key);
 
-  replayListening = false;
-  replayHotkeyBtn.classList.remove('listening');
-  replayHotkeyBtn.textContent = 'Change';
+  setHotkeyListening(false);
   patchReplay({ hotkey: parts.join('+') });
 }, true);
 
@@ -2377,6 +2413,8 @@ api.onCaptureEvent((event) => {
   switch (event.event) {
     case 'status':
       setReplayCapturing(event.recording);
+      replayHotkeyOk = event.hotkeyOk !== false;
+      renderHotkeyWarning();
       replayFront = { process: event.foreground || '', category: event.category || '', isGame: !!event.isGame, recording: !!event.worthRecording, reason: event.reason || '' };
       replayMicState = {
         active: !!event.micActive,
@@ -2430,7 +2468,16 @@ api.onCaptureEvent((event) => {
       showToast(`✓ Replay saved — ${Math.round(event.durationMs / 1000)}s`, 'success');
       scanAndRender();
       break;
+    case 'hotkey-captured':
+      if (!replayListening) break;
+      setHotkeyListening(false);
+      // A null spec is Escape, or fifteen seconds of nothing. Either way, no change.
+      if (event.spec) patchReplay({ hotkey: event.spec });
+      break;
     case 'error':
+      // Hotkey trouble has a permanent home under the field now; a toast that says it too, and
+      // then vanishes, is just noise on top.
+      if (String(event.message || '').startsWith('hotkey:')) break;
       showToast('Replay: ' + event.message, 'error', 4000);
       break;
   }

@@ -1,10 +1,17 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, nativeImage, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
+const net = require('net');
 const os = require('os');
 
 let mainWindow;
+let quitting = false;
+
+// Windows keys toasts off the app user model id, and a notification from an id it does not
+// recognise is dropped without a word. It has to match the `appId` electron-builder writes into
+// the Start Menu shortcut, or a packaged build gets no notifications at all.
+app.setAppUserModelId('com.clipper.app');
 
 app.commandLine.appendSwitch('--disable-renderer-backgrounding');
 app.commandLine.appendSwitch('--disable-background-timer-throttling');
@@ -49,10 +56,41 @@ function createWindow() {
     show: true,
   });
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
+
+  mainWindow.on('close', (e) => {
+    if (quitting || !loadCaptureConfig().enabled) return;
+    e.preventDefault();
+    mainWindow.hide();
+  });
 }
 
-app.whenReady().then(createWindow);
-app.on('window-all-closed', () => app.quit());
+// Two copies would mean two capture daemons fighting over one segment directory, so the second
+// launch hands focus back to the first and exits.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+}
+
+app.whenReady().then(() => {
+  createWindow();
+  setupTray();
+  if (loadCaptureConfig().enabled) startCaptureDaemon();
+});
+
+// With capture on, closing the window leaves the recorder running — that is the whole point of a
+// replay buffer. The tray icon is then the only way back, which is why it is always created.
+app.on('window-all-closed', () => {
+  if (!loadCaptureConfig().enabled) app.quit();
+});
+
+app.on('before-quit', () => { quitting = true; stopCaptureDaemon(); });
 
 // ── IPC ───────────────────────────────────────────────────────────────────────
 
@@ -248,6 +286,351 @@ ipcMain.handle('video:passthrough', async (_, opts) => runPassthrough(opts));
 ipcMain.handle('window:minimize', () => mainWindow.minimize());
 ipcMain.handle('window:maximize', () => { if (mainWindow.isMaximized()) mainWindow.unmaximize(); else mainWindow.maximize(); });
 ipcMain.handle('window:close', () => mainWindow.close());
+
+// ── Capture daemon ────────────────────────────────────────────────────────────
+// clipper-capture keeps the last N seconds of a monitor encoded in a ring buffer and writes an
+// MP4 when its hotkey fires. It runs as a separate process so it survives this window closing,
+// and it is configured through a file of its own rather than prefs.json — savePrefs() rewrites
+// that whole file from the renderer's settings object, which would race a daemon reading it.
+
+const CAPTURE_PIPE = '\\\\.\\pipe\\clipper-capture';
+const captureConfigPath = path.join(app.getPath('userData'), 'capture.json');
+
+const CAPTURE_DEFAULTS = {
+  version: 1,
+  gameDetection: 'auto',
+  notifyOnSave: true,
+  enabled: false,          // off until asked for: it costs GPU time and disk continuously
+  recordMode: 'game',
+  bufferSeconds: 60,
+  monitor: { device: '', friendly: '' },
+  quality: 'high',
+  outputPath: '',
+  perGameSubfolder: true,
+  hotkey: 'Ctrl+Alt+F12',
+  audio: { desktop: true, mic: true, micDevice: '', micGainDb: 0 },
+  toneMap: 'auto',
+  segmentDir: null,
+  includeProcesses: [],
+  excludeProcesses: [],
+};
+
+// The daemon process is started and stopped for exactly one reason: the feature being switched on
+// or off. Every other change goes down the pipe as `reload`, and the daemon decides for itself
+// whether that means rebuilding its pipeline.
+//
+// It used to restart the process for quality, tone mapping and the segment directory, and that is
+// what made settings look like they were not applying. `stopCaptureDaemon()` returned as soon as
+// it had asked the old daemon to quit, but the old daemon holds the single-instance mutex and the
+// named pipe until it has finished flushing its ring — so the replacement spawned 300 ms later
+// found the mutex taken and exited on the spot, leaving nothing recording and a settings panel
+// quoting a process that no longer existed.
+const capture = {
+  proc: null,
+  sock: null,
+  retry: null,
+  status: null,
+  tray: null,
+  awaitingStatus: null,
+  // Bumped on every stop, so a dying socket's handlers cannot touch the daemon that replaced it.
+  generation: 0,
+  // The previous daemon, while it is still on its way out.
+  dying: null,
+  starting: false,
+  // A reload asked for before the pipe was up. Dropping it is what a lost setting looks like.
+  pendingReload: false,
+};
+
+function getCapturePath() {
+  if (app.isPackaged) {
+    const packaged = path.join(process.resourcesPath, 'capture-bin', 'clipper-capture.exe');
+    if (fs.existsSync(packaged)) return packaged;
+  }
+  const dev = path.join(__dirname, '..', 'capture', 'target', 'release', 'clipper-capture.exe');
+  if (fs.existsSync(dev)) return dev;
+  return path.join(__dirname, '..', 'capture-bin', 'clipper-capture.exe');
+}
+
+function loadCaptureConfig() {
+  try {
+    const saved = JSON.parse(fs.readFileSync(captureConfigPath, 'utf8'));
+    // `audio` is merged a level deeper than the rest. A spread would replace the whole object, so a
+    // config written before the microphone existed — `{ desktop: true }` — would leave `mic`
+    // undefined here while the daemon, which fills missing fields from its own defaults, has it on.
+    // The panel would then show a switch that disagreed with what was being recorded.
+    return {
+      ...CAPTURE_DEFAULTS,
+      ...saved,
+      audio: { ...CAPTURE_DEFAULTS.audio, ...(saved.audio || {}) },
+    };
+  } catch { return { ...CAPTURE_DEFAULTS, audio: { ...CAPTURE_DEFAULTS.audio } }; }
+}
+
+// Written temp-then-rename so the daemon can never read a half-written file.
+function writeCaptureConfig(config) {
+  const tmp = captureConfigPath + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(config, null, 2), 'utf8');
+  fs.renameSync(tmp, captureConfigPath);
+}
+
+function sendCapture(cmd) {
+  if (!capture.sock) return false;
+  try { capture.sock.write(JSON.stringify({ cmd }) + '\n'); return true; }
+  catch { return false; }
+}
+
+function startCaptureDaemon() {
+  if (capture.proc || capture.starting) return;
+
+  // One daemon at a time, enforced by a named mutex on the other side. Wait for the last one to
+  // let go rather than racing it and losing.
+  if (capture.dying) {
+    capture.starting = true;
+    const previous = capture.dying;
+    const go = () => {
+      if (capture.dying !== previous && capture.dying !== null) return;
+      capture.dying = null;
+      capture.starting = false;
+      if (loadCaptureConfig().enabled) startCaptureDaemon();
+    };
+    previous.once('exit', go);
+    setTimeout(go, 3000);
+    return;
+  }
+
+  const exe = getCapturePath();
+  if (!fs.existsSync(exe)) {
+    sendCaptureEvent({ event: 'error', message: 'clipper-capture.exe not found — build it with cargo build --release in capture/' });
+    return;
+  }
+  if (!fs.existsSync(captureConfigPath)) writeCaptureConfig(loadCaptureConfig());
+
+  // --parent-pid is how the daemon knows to exit if this process is killed outright. An orphaned
+  // recorder writing to disk forever is the worst failure available here.
+  const generation = ++capture.generation;
+  const proc = spawn(exe, [
+    'daemon', '--config', captureConfigPath, '--parent-pid', String(process.pid),
+  ], { windowsHide: true, stdio: 'ignore', detached: false });
+  capture.proc = proc;
+
+  proc.on('exit', () => {
+    if (capture.dying === proc) capture.dying = null;
+    if (capture.generation !== generation) return;
+    capture.proc = null;
+    capture.status = null;
+    updateTray();
+    sendCaptureEvent({ event: 'state', recording: false });
+  });
+  proc.on('error', (e) => sendCaptureEvent({ event: 'error', message: e.message }));
+
+  connectCapture(generation);
+}
+
+function stopCaptureDaemon() {
+  const proc = capture.proc;
+  if (!proc) return;
+
+  capture.generation++;
+  if (capture.retry) { clearTimeout(capture.retry); capture.retry = null; }
+  const sock = capture.sock;
+  capture.proc = null;
+  capture.sock = null;
+  capture.status = null;
+  capture.pendingReload = false;
+  capture.dying = proc;
+
+  let asked = false;
+  if (sock) {
+    try { sock.write(JSON.stringify({ cmd: 'quit' }) + '\n'); asked = true; } catch {}
+  }
+  if (!asked) { try { proc.kill(); } catch {} }
+
+  // The daemon flushes its ring on the way out; give it a moment before insisting.
+  setTimeout(() => {
+    try { if (sock) sock.destroy(); } catch {}
+    try { proc.kill(); } catch {}
+  }, 2000);
+
+  sendCaptureEvent({ event: 'state', recording: false });
+  updateTray();
+}
+
+function connectCapture(generation) {
+  if (capture.generation !== generation || capture.sock || !capture.proc) return;
+  const sock = net.connect({ path: CAPTURE_PIPE });
+  let buffer = '';
+
+  sock.on('connect', () => {
+    if (capture.generation !== generation) { sock.destroy(); return; }
+    capture.sock = sock;
+    // A setting changed while the pipe was still coming up is still a setting the user changed.
+    if (capture.pendingReload) { capture.pendingReload = false; sendCapture('reload'); }
+    sendCapture('status');
+  });
+  sock.on('data', (chunk) => {
+    buffer += chunk.toString();
+    let nl;
+    while ((nl = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      if (!line) continue;
+      try { handleCaptureEvent(JSON.parse(line)); } catch {}
+    }
+  });
+
+  const retry = () => {
+    if (capture.sock === sock) capture.sock = null;
+    sock.destroy();
+    // The daemon may still be starting up; keep trying while the process is alive.
+    if (capture.generation === generation && capture.proc && !capture.retry) {
+      capture.retry = setTimeout(() => { capture.retry = null; connectCapture(generation); }, 500);
+    }
+  };
+  sock.on('error', retry);
+  sock.on('close', retry);
+}
+
+function handleCaptureEvent(event) {
+  if (event.event === 'status') {
+    capture.status = event;
+    if (capture.awaitingStatus) { capture.awaitingStatus(event); capture.awaitingStatus = null; }
+  }
+  if (event.event === 'state') capture.status = { ...(capture.status || {}), recording: event.recording };
+  if (event.event === 'clip-saved') notifyClipSaved(event);
+  updateTray();
+  sendCaptureEvent(event);
+}
+
+// A toast in the corner of the screen, because the hotkey is pressed while you are looking at a
+// game and the app's own toast is behind it. Silent on purpose: this fires mid-play, and a
+// notification chime over your own game audio is worse than no notification at all.
+function notifyClipSaved(event) {
+  if (!Notification.isSupported()) return;
+  if (loadCaptureConfig().notifyOnSave === false) return;
+
+  const seconds = Math.round((event.durationMs || 0) / 1000);
+  const where = event.game && event.game !== 'Desktop' ? ' \u00b7 ' + event.game : '';
+  const toast = new Notification({
+    title: 'Replay saved',
+    body: 'The last ' + seconds + 's' + where,
+    icon: trayIcon('tray.png'),
+    silent: true,
+  });
+  toast.on('click', showWindow);
+  toast.show();
+}
+
+function sendCaptureEvent(event) {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('capture:event', event);
+}
+
+// ── Tray ──────────────────────────────────────────────────────────────────────
+
+function trayIcon(name) {
+  return nativeImage.createFromPath(path.join(__dirname, '..', 'assets', name));
+}
+
+function setupTray() {
+  if (capture.tray) return;
+  capture.tray = new Tray(trayIcon('tray-idle.png'));
+  capture.tray.on('click', showWindow);
+  updateTray();
+}
+
+function showWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function updateTray() {
+  if (!capture.tray) return;
+  const config = loadCaptureConfig();
+  const recording = !!(capture.status && capture.status.recording);
+
+  capture.tray.setImage(trayIcon(recording ? 'tray.png' : 'tray-idle.png'));
+  capture.tray.setToolTip(
+    !config.enabled ? 'Clipper — instant replay off'
+      : recording ? `Clipper — buffering the last ${Math.round(config.bufferSeconds)}s`
+      : 'Clipper — waiting for a game');
+
+  capture.tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'Open Clipper', click: showWindow },
+    { type: 'separator' },
+    {
+      label: 'Instant replay',
+      type: 'checkbox',
+      checked: config.enabled,
+      click: () => applyCaptureConfig({ enabled: !config.enabled }),
+    },
+    {
+      label: `Save clip  (${config.hotkey})`,
+      enabled: recording,
+      click: () => sendCapture('save'),
+    },
+    { type: 'separator' },
+    { label: 'Quit Clipper', click: () => { quitting = true; app.quit(); } },
+  ]));
+}
+
+// Writes a patch to the config file and gets the daemon into the right state for it.
+function applyCaptureConfig(patch) {
+  const before = loadCaptureConfig();
+  // Same reason as the merge in loadCaptureConfig: a caller sending one audio key must not blank
+  // the other two.
+  const after = { ...before, ...patch };
+  if (patch.audio) after.audio = { ...before.audio, ...patch.audio };
+  writeCaptureConfig(after);
+
+  if (!after.enabled) {
+    stopCaptureDaemon();
+  } else if (!capture.proc) {
+    startCaptureDaemon();
+  } else if (!sendCapture('reload')) {
+    // The pipe is not up yet. Remember, and send it the moment it is.
+    capture.pendingReload = true;
+  }
+
+  updateTray();
+  // The settings panel is not the only thing that writes this file — the tray menu toggles capture
+  // on and off too, and a panel still showing the old config would hand it straight back on the
+  // next change. Tell the window what the config is now, whoever changed it.
+  sendCaptureEvent({ event: 'config', config: after });
+  return after;
+}
+
+ipcMain.handle('capture:config', () => loadCaptureConfig());
+ipcMain.handle('capture:setConfig', (_, patch) => applyCaptureConfig(patch));
+// Waits for a fresh reply rather than handing back the cache. A daemon that has stopped
+// answering is exactly the failure worth seeing, and a stale cache hides it behind numbers that
+// look fine.
+ipcMain.handle('capture:status', () => new Promise((resolve) => {
+  if (!sendCapture('status')) return resolve(null);
+  const timer = setTimeout(() => { capture.awaitingStatus = null; resolve(null); }, 1500);
+  capture.awaitingStatus = (status) => { clearTimeout(timer); resolve(status); };
+}));
+ipcMain.handle('capture:save', () => sendCapture('save'));
+ipcMain.handle('capture:available', () => fs.existsSync(getCapturePath()));
+
+// The daemon is the authority on what monitors exist and whether each is in HDR right now, so ask
+// it rather than duplicating the detection in Electron.
+function askCapture(command) {
+  return new Promise((resolve) => {
+    const exe = getCapturePath();
+    if (!fs.existsSync(exe)) return resolve([]);
+    const proc = spawn(exe, [command], { windowsHide: true });
+    let out = '';
+    proc.stdout.on('data', (d) => out += d.toString());
+    proc.on('error', () => resolve([]));
+    proc.on('close', () => { try { resolve(JSON.parse(out)); } catch { resolve([]); } });
+  });
+}
+
+ipcMain.handle('capture:monitors', () => askCapture('monitors'));
+
+// Microphones, asked for fresh every time the panel opens rather than cached: a headset that was
+// plugged in a minute ago is exactly the device somebody is coming here to pick.
+ipcMain.handle('capture:inputs', () => askCapture('inputs'));
 
 // ── Probing ───────────────────────────────────────────────────────────────────
 // ffmpeg (not ffprobe) is the only binary we ship, so metadata comes from parsing

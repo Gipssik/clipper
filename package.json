@@ -38,6 +38,11 @@
         "from": "ffmpeg-bin/",
         "to": "ffmpeg-bin/",
         "filter": ["**/*"]
+      },
+      {
+        "from": "capture-bin/",
+        "to": "capture-bin/",
+        "filter": ["**/*"]
       }
     ]
   }

@@ -1385,6 +1385,8 @@ api.onEncodeProgress(p => {
 // ── Settings ──────────────────────────────────────────────────────────────────
 const settingsBtn       = document.getElementById('settings-btn');
 const settingsOverlay   = document.getElementById('settings-overlay');
+const settingsTabs      = document.getElementById('settings-tabs');
+const settingsBody      = document.getElementById('settings-body');
 const settingsCloseBtn  = document.getElementById('settings-close-btn');
 const settingsDoneBtn   = document.getElementById('settings-done');
 const settingsResetBtn  = document.getElementById('settings-reset');
@@ -1430,8 +1432,27 @@ function persistSettings() {
   api.savePrefs({ settings });
 }
 
+// Which tab Settings opens on. Remembered for the session but not persisted: coming back to where
+// you just were is helpful, being dropped into Instant replay a week later because that is where you
+// last were is not.
+let settingsTab = 'library';
+
+function showSettingsTab(name) {
+  settingsTab = name;
+  for (const tab of settingsTabs.children) tab.classList.toggle('active', tab.dataset.tab === name);
+  for (const panel of settingsBody.children) panel.classList.toggle('active', panel.dataset.panel === name);
+  // Each tab is its own page, so it starts at the top rather than wherever the last one was left.
+  settingsBody.scrollTop = 0;
+}
+
+settingsTabs.addEventListener('click', e => {
+  const tab = e.target.closest('[data-tab]');
+  if (tab) showSettingsTab(tab.dataset.tab);
+});
+
 async function openSettings() {
   settingsOverlay.classList.add('open');
+  showSettingsTab(settingsTab);
   // The probe is lazy, so Settings may be the first thing that needs it.
   if (!encoderList) encoderList = await api.getEncoders();
   buildDefaultEncoderSelect();
@@ -1942,3 +1963,459 @@ function refreshExportLabels() {
 }
 
 applySettings();
+
+// ── Instant replay ────────────────────────────────────────────────────────────
+// The daemon owns the recording; this is only its control panel. Every change is written to
+// capture.json and the main process decides whether that needs a reload or a restart — the
+// distinction matters because a restart throws away whatever is buffered.
+
+const replayOptions     = document.getElementById('replay-options');
+const replaySwitch      = document.getElementById('replay-switch');
+const replayBufferSlider= document.getElementById('replay-buffer-slider');
+const replayBufferValue = document.getElementById('replay-buffer-value');
+const replayBufferTip   = document.getElementById('replay-buffer-tip');
+const replayQualitySeg  = document.getElementById('replay-quality-seg');
+const replayQualityTip  = document.getElementById('replay-quality-tip');
+const replayMonitorSel  = document.getElementById('replay-monitor-select');
+const replayModeSeg     = document.getElementById('replay-mode-seg');
+const replayModeTip     = document.getElementById('replay-mode-tip');
+const replayHotkeyValue = document.getElementById('replay-hotkey-value');
+const replayHotkeyBtn   = document.getElementById('replay-hotkey-btn');
+const replayPathValue   = document.getElementById('replay-path-value');
+const replayPathBtn     = document.getElementById('replay-path-btn');
+const replayPerGameSw   = document.getElementById('replay-pergame-switch');
+const replayAudioSw     = document.getElementById('replay-audio-switch');
+const replayMicRow      = document.getElementById('replay-mic-row');
+const replayMicSw       = document.getElementById('replay-mic-switch');
+const replayMicField    = document.getElementById('replay-mic-device-field');
+const replayMicSel      = document.getElementById('replay-mic-select');
+const replayMicTip      = document.getElementById('replay-mic-tip');
+const replayMicGainField= document.getElementById('replay-mic-gain-field');
+const replayMicGainSl   = document.getElementById('replay-mic-gain-slider');
+const replayMicGainVal  = document.getElementById('replay-mic-gain-value');
+const replayNotifySw    = document.getElementById('replay-notify-switch');
+const replayStatus      = document.getElementById('replay-status');
+const replayStatusText  = document.getElementById('replay-status-text');
+const replayFrontText   = document.getElementById('replay-front-text');
+const replayFrontGame   = document.getElementById('replay-front-game');
+const replayFrontNot    = document.getElementById('replay-front-notgame');
+
+// Two bitrates per tier. `mbps` is what a continuously busy game costs, because that is what the
+// buffer has to be sized for — a football match spends the peak allowance from start to finish, so
+// quoting the average would understate the disk by half. `typical` is what a normal mix of play
+// comes out at, which is the number anybody actually recognises from their clips folder.
+const REPLAY_TIERS = {
+  low:    { mbps: 11, typical: 8,  label: '720p60',   note: 'Where hardware recorders sit on the same game, at a fifth of the encode cost of 1440p. Small text goes a little soft.' },
+  medium: { mbps: 19, typical: 14, label: '1080p60',  note: 'Full HD at a modest bitrate. Fast motion can smear a little.' },
+  high:   { mbps: 27, typical: 20, label: '1080p60',  note: 'Full HD with enough bitrate to hold up in a firefight. The sensible default.' },
+  ultra:  { mbps: 43, typical: 32, label: '1440p60',  note: 'Sharper than most places will let you upload.' },
+  native: { mbps: 56, typical: 42, label: 'native60', note: 'Records your screen at its own resolution. The most expensive option in every direction.' },
+};
+
+// Megabytes a minute at the tier's typical rate — the unit people think in when they look at a
+// clips folder, rather than megabits a second.
+function tierMbPerMinute(tier) {
+  return Math.round((tier.typical * 60) / 8);
+}
+
+let replayConfig = null;
+let replayCapturing = false;
+
+function formatReplayDuration(seconds) {
+  if (seconds < 60) return seconds + 's';
+  const m = Math.floor(seconds / 60), s = seconds % 60;
+  return s ? `${m}m ${String(s).padStart(2, '0')}s` : `${m}m`;
+}
+
+function replayDiskEstimate(seconds, quality) {
+  const tier = REPLAY_TIERS[quality] || REPLAY_TIERS.high;
+  const gb = (tier.mbps * seconds) / 8 / 1000;
+  return gb < 1 ? `${Math.round(gb * 1000)} MB` : `${gb.toFixed(1)} GB`;
+}
+
+function applyReplayUi() {
+  if (!replayConfig) return;
+  const c = replayConfig;
+
+  replaySwitch.classList.toggle('on', c.enabled);
+  replayOptions.classList.toggle('off', !c.enabled);
+
+  replayBufferSlider.value = c.bufferSeconds;
+  replayBufferValue.textContent = formatReplayDuration(c.bufferSeconds);
+  replayBufferTip.textContent =
+    `How far back the hotkey can reach. Held on disk rather than in memory, so this costs about ` +
+    `${replayDiskEstimate(c.bufferSeconds, c.quality)} of space and no RAM.`;
+
+  [...replayQualitySeg.children].forEach(b => b.classList.toggle('active', b.dataset.q === c.quality));
+  const tier = REPLAY_TIERS[c.quality] || REPLAY_TIERS.high;
+  replayQualityTip.textContent =
+    `${tier.label}, about ${tierMbPerMinute(tier)} MB a minute and at most ` +
+    `${Math.round((tier.mbps * 60) / 8)} MB when a game is busy from start to finish. ` +
+    `${tier.note} Changing this rebuilds the recorder, so the buffer starts over.`;
+
+  [...replayModeSeg.children].forEach(b => b.classList.toggle('active', b.dataset.mode === c.recordMode));
+  replayModeTip.textContent = c.recordMode === 'game'
+    ? 'Starts when something takes over the whole screen and stops when you alt-tab back. Nothing runs while you are just at the desktop.'
+    : 'Always buffering while Clipper is open. Catches things outside games, and keeps a slice of your GPU busy the whole time.';
+
+  replayHotkeyValue.textContent = c.hotkey;
+  replayPathValue.textContent = c.outputPath || 'Your Videos folder';
+  replayPerGameSw.classList.toggle('on', c.perGameSubfolder);
+  const audio = c.audio || {};
+  replayAudioSw.classList.toggle('on', !!audio.desktop);
+  replayMicSw.classList.toggle('on', !!audio.mic);
+  replayMicField.classList.toggle('off', !audio.mic);
+  replayMicGainField.classList.toggle('off', !audio.mic);
+  const gain = Math.round(audio.micGainDb || 0);
+  replayMicGainSl.value = gain;
+  replayMicGainVal.textContent = (gain > 0 ? '+' : '') + gain + ' dB';
+  if (replayMicSel.options.length) {
+    // An id we no longer recognise means the device it named is gone. Fall back to the default
+    // entry rather than showing a blank picker, but leave the setting alone: plug the headset back
+    // in and it should be selected again, not quietly replaced.
+    const known = [...replayMicSel.options].some(o => o.value === (audio.micDevice || ''));
+    replayMicSel.value = known ? (audio.micDevice || '') : '';
+  }
+  renderMicTip();
+  replayNotifySw.classList.toggle('on', c.notifyOnSave !== false);
+  renderForeground();
+
+  // An unset monitor means "not chosen yet", not "none" — show the primary rather than a blank
+  // dropdown, and record the choice so the daemon and the UI agree on what is being recorded.
+  const wanted = c.monitor.friendly || c.monitor.device || '';
+  if (replayMonitorSel.options.length) {
+    const known = [...replayMonitorSel.options].some(o => o.value === wanted);
+    if (!known) {
+      const fallback = replayMonitors.find(m => m.primary) || replayMonitors[0];
+      if (fallback) {
+        replayMonitorSel.value = fallback.friendly || fallback.device;
+        if (!wanted) {
+          c.monitor = { device: fallback.device, friendly: fallback.friendly };
+        }
+      }
+    } else {
+      replayMonitorSel.value = wanted;
+    }
+  }
+}
+
+async function patchReplay(patch) {
+  replayConfig = await api.setCaptureConfig(patch);
+  applyReplayUi();
+  // Ask for the truth rather than assume the change took. Anything that rebuilds the pipeline —
+  // quality, screen, HDR — takes a moment, and a status line still describing the old one is what
+  // "the settings did not apply" feels like from the outside, even when they did.
+  if (replayConfig.enabled) {
+    setReplayStatus('Applying…', false);
+    api.captureStatus();
+  }
+}
+
+// What the daemon last said was in front, and what it made of it.
+let replayFront = { process: '', category: '', isGame: false, recording: false, reason: '' };
+
+const stem = (name) => (name || '').toLowerCase().replace(/\.exe$/, '');
+
+/// Which of the two lists the process in front is currently on, if either.
+function listedAs() {
+  const name = stem(replayFront.process);
+  if (!name) return null;
+  const on = (list) => (list || []).some(p => stem(p) === name);
+  if (on(replayConfig && replayConfig.includeProcesses)) return 'game';
+  if (on(replayConfig && replayConfig.excludeProcesses)) return 'not';
+  return null;
+}
+
+// Moves the process in front on and off the two lists the classifier checks before anything else.
+// Taking it off the other list at the same time is what makes these behave like one three-way
+// choice rather than two flags that can contradict each other.
+function classifyForeground(verdict) {
+  const name = (replayFront.process || '').trim();
+  if (!name) return;
+  const without = (list) => (list || []).filter(p => stem(p) !== stem(name));
+
+  const includeProcesses = without(replayConfig.includeProcesses);
+  const excludeProcesses = without(replayConfig.excludeProcesses);
+  if (verdict === 'game') includeProcesses.push(name);
+  if (verdict === 'not') excludeProcesses.push(name);
+  patchReplay({ includeProcesses, excludeProcesses });
+}
+
+replayFrontGame.addEventListener('click', () =>
+  classifyForeground(listedAs() === 'game' ? 'clear' : 'game'));
+replayFrontNot.addEventListener('click', () =>
+  classifyForeground(listedAs() === 'not' ? 'clear' : 'not'));
+
+function renderForeground() {
+  const name = replayFront.process;
+  if (!name) {
+    replayFrontText.textContent = 'Nothing in front yet.';
+    replayFrontGame.disabled = replayFrontNot.disabled = true;
+    return;
+  }
+  replayFrontGame.disabled = replayFrontNot.disabled = false;
+  // Two verdicts, because they are two decisions. Whether to record is generous — a clip filed
+  // in the wrong folder can be moved, one that was never recorded cannot — and whether to name
+  // a folder after it is not.
+  // The folder name comes from the daemon, never from the process name: what a game's executable
+  // is called and what the game is called are routinely different things, and the recorder is the
+  // side that knows how to tell (Steam's manifests, the install layout, the version resource).
+  const folder = replayFront.category || (replayFront.isGame ? stem(name) : 'Desktop');
+  const recording = replayConfig && replayConfig.recordMode === 'always'
+    ? 'Recording anyway, since you record everything'
+    : replayFront.recording ? 'Recording' : 'Not recording';
+  replayFrontText.textContent =
+    `In front: ${name} — ${replayFront.reason || (replayFront.isGame ? 'a game' : 'not a game')}. ` +
+    `${recording}; clips go to ${folder}.`;
+
+  const listed = listedAs();
+  replayFrontGame.classList.toggle('on', listed === 'game');
+  replayFrontNot.classList.toggle('on', listed === 'not');
+  replayFrontGame.textContent = listed === 'game' ? 'Always a game ✓' : 'Treat as a game';
+  replayFrontNot.textContent = listed === 'not' ? 'Never a game ✓' : 'Never a game';
+}
+
+// What the microphone line says depends on three separate facts the daemon reports, because
+// "there is no voice in my clip" has three different causes: not asked for, asked for and running,
+// asked for and refused. A mic that failed to open has to look different from a quiet room.
+let replayMicState = { active: false, device: '', error: null, wanted: false, peakDb: null };
+
+function renderMicTip() {
+  const chosen = replayMicSel.selectedOptions[0];
+  const picked = chosen ? chosen.textContent : 'your default microphone';
+  if (!replayConfig || !replayConfig.audio || !replayConfig.audio.mic) {
+    replayMicTip.textContent = 'Which one to listen to. Changing it rebuilds the recorder, so the buffer starts over.';
+    return;
+  }
+  if (replayMicState.error) {
+    replayMicTip.textContent =
+      `Could not open ${picked}: ${replayMicState.error}. Still recording everything else, and still trying — plug it back in and it picks up on its own.`;
+    return;
+  }
+  if (replayMicState.active && replayMicState.device) {
+    // The measured level is the point of showing anything here: "set the boost until this reads
+    // about -12 dB while you talk" is advice somebody can act on.
+    const peak = replayMicState.peakDb;
+    const level = typeof peak === 'number' && peak > -100
+      ? ` Peaking at ${peak.toFixed(0).replace('-', '−')} dB — aim for about −12 dB while you talk.`
+      : ' Silent right now.';
+    replayMicTip.textContent = `Recording from ${replayMicState.device}.${level}`;
+    return;
+  }
+  replayMicTip.textContent = 'Which one to listen to. Changing it rebuilds the recorder, so the buffer starts over.';
+}
+
+function buildReplayMics(devices) {
+  replayMicSel.innerHTML = '';
+  // "Use default device" is not the same choice as naming whichever device is default today: it
+  // follows the system, so plugging in a headset moves the recording to it without coming back here.
+  const auto = document.createElement('option');
+  const fallback = devices.find(d => d.default);
+  auto.value = '';
+  auto.textContent = fallback
+    ? `Use default device — ${fallback.name}`
+    : 'Use default device';
+  replayMicSel.appendChild(auto);
+  for (const d of devices) {
+    const option = document.createElement('option');
+    option.value = d.id;
+    option.textContent = d.name;
+    replayMicSel.appendChild(option);
+  }
+}
+
+function buildReplayMonitors(monitors) {
+  replayMonitorSel.innerHTML = '';
+  for (const m of monitors) {
+    const option = document.createElement('option');
+    option.value = m.friendly || m.device;
+    const bits = [`${m.width}x${m.height}`];
+    if (m.primary) bits.push('primary');
+    if (m.hdr && m.hdr.enabled) bits.push('HDR');
+    option.textContent = `${m.friendly} — ${bits.join(', ')}`;
+    replayMonitorSel.appendChild(option);
+  }
+  if (!monitors.length) {
+    const option = document.createElement('option');
+    option.textContent = 'No displays found';
+    replayMonitorSel.appendChild(option);
+  }
+}
+
+function setReplayStatus(text, live, warn) {
+  replayStatusText.textContent = text;
+  replayStatus.classList.toggle('live', !!live);
+  replayStatus.classList.toggle('warn', !!warn);
+}
+
+replaySwitch.addEventListener('click', () => patchReplay({ enabled: !replayConfig.enabled }));
+replayPerGameSw.addEventListener('click', () => patchReplay({ perGameSubfolder: !replayConfig.perGameSubfolder }));
+// Spread rather than replace: the audio object has three keys now, and writing one of them as a
+// fresh object would silently drop the other two.
+replayAudioSw.addEventListener('click', () =>
+  patchReplay({ audio: { ...replayConfig.audio, desktop: !replayConfig.audio.desktop } }));
+replayMicRow.addEventListener('click', () =>
+  patchReplay({ audio: { ...replayConfig.audio, mic: !replayConfig.audio.mic } }));
+replayMicSel.addEventListener('change', () =>
+  patchReplay({ audio: { ...replayConfig.audio, micDevice: replayMicSel.value } }));
+// Dragging writes on every step, and the daemon takes it in place: gain is one multiply per
+// sample, so there is nothing to rebuild and no buffered footage to lose.
+replayMicGainSl.addEventListener('input', () => {
+  const db = parseInt(replayMicGainSl.value, 10);
+  replayMicGainVal.textContent = (db > 0 ? '+' : '') + db + ' dB';
+  patchReplay({ audio: { ...replayConfig.audio, micGainDb: db } });
+});
+replayNotifySw.addEventListener('click', () => patchReplay({ notifyOnSave: replayConfig.notifyOnSave === false }));
+
+replayBufferSlider.addEventListener('input', () => {
+  // Redraw from the pending value so the tip's size estimate tracks the thumb, but only write the
+  // file once the user lets go — every write pokes the daemon.
+  replayConfig.bufferSeconds = parseInt(replayBufferSlider.value);
+  applyReplayUi();
+});
+replayBufferSlider.addEventListener('change', () =>
+  patchReplay({ bufferSeconds: parseInt(replayBufferSlider.value) }));
+
+replayQualitySeg.addEventListener('click', (e) => {
+  const btn = e.target.closest('button');
+  if (btn) patchReplay({ quality: btn.dataset.q });
+});
+replayModeSeg.addEventListener('click', (e) => {
+  const btn = e.target.closest('button');
+  if (btn) patchReplay({ recordMode: btn.dataset.mode });
+});
+replayMonitorSel.addEventListener('change', () => {
+  const chosen = replayMonitors.find(m => (m.friendly || m.device) === replayMonitorSel.value);
+  if (chosen) patchReplay({ monitor: { device: chosen.device, friendly: chosen.friendly } });
+});
+
+replayPathBtn.addEventListener('click', async () => {
+  const folder = await api.openFolder();
+  if (folder) patchReplay({ outputPath: folder });
+});
+
+// Captures the next combination the user presses. Modifier-only presses are ignored so the label
+// does not flicker to "Ctrl" on the way to Ctrl+Alt+F12.
+let replayListening = false;
+replayHotkeyBtn.addEventListener('click', () => {
+  replayListening = !replayListening;
+  replayHotkeyBtn.classList.toggle('listening', replayListening);
+  replayHotkeyBtn.textContent = replayListening ? 'Press keys…' : 'Change';
+});
+
+window.addEventListener('keydown', (e) => {
+  if (!replayListening) return;
+  e.preventDefault();
+  e.stopPropagation();
+
+  if (e.key === 'Escape') {
+    replayListening = false;
+    replayHotkeyBtn.classList.remove('listening');
+    replayHotkeyBtn.textContent = 'Change';
+    return;
+  }
+  if (['Control', 'Alt', 'Shift', 'Meta'].includes(e.key)) return;
+
+  const parts = [];
+  if (e.ctrlKey) parts.push('Ctrl');
+  if (e.altKey) parts.push('Alt');
+  if (e.shiftKey) parts.push('Shift');
+  if (e.metaKey) parts.push('Win');
+  parts.push(e.key.length === 1 ? e.key.toUpperCase() : e.key);
+
+  replayListening = false;
+  replayHotkeyBtn.classList.remove('listening');
+  replayHotkeyBtn.textContent = 'Change';
+  patchReplay({ hotkey: parts.join('+') });
+}, true);
+
+let replayMonitors = [];
+
+async function initReplay() {
+  if (!(await api.captureAvailable())) {
+    replaySwitch.style.pointerEvents = 'none';
+    replaySwitch.style.opacity = '0.3';
+    setReplayStatus('Recorder not installed — build capture/ with cargo build --release', false);
+    replayConfig = await api.captureConfig();
+    return;
+  }
+  replayConfig = await api.captureConfig();
+  replayMonitors = await api.captureMonitors();
+  buildReplayMonitors(replayMonitors);
+  buildReplayMics(await api.captureInputs());
+  applyReplayUi();
+  setReplayStatus(replayConfig.enabled ? 'Starting…' : 'Not running', false);
+  api.captureStatus();
+}
+
+api.onCaptureEvent((event) => {
+  switch (event.event) {
+    case 'status':
+      replayCapturing = event.recording;
+      replayFront = { process: event.foreground || '', category: event.category || '', isGame: !!event.isGame, recording: !!event.worthRecording, reason: event.reason || '' };
+      replayMicState = {
+        active: !!event.micActive,
+        device: event.micDevice || '',
+        error: event.micError || null,
+        wanted: !!event.micWanted,
+        peakDb: typeof event.micPeakDb === 'number' ? event.micPeakDb : null,
+      };
+      renderMicTip();
+      renderForeground();
+      if (event.enabled && !event.displayPresent) {
+        setReplayStatus(`Waiting for ${event.monitor} to come back`, false, true);
+      } else if (event.recording) {
+        const size = event.size ? event.size.width + '×' + event.size.height : '';
+        const bits = [`Buffering ${Math.round((event.bufferedMs || 0) / 1000)}s of ${size} on ${event.monitor}`];
+        if (event.toneMap) bits.push('HDR tone mapped');
+        if (event.fps) bits.push(`${event.fps} fps`);
+        setReplayStatus(bits.join(' · '), true);
+      } else {
+        setReplayStatus(event.enabled
+          ? `Waiting for a game — ${event.foreground || 'nothing'} is in front`
+          : 'Not running', false);
+      }
+      break;
+    case 'state':
+      replayCapturing = event.recording;
+      api.captureStatus();
+      break;
+    case 'foreground':
+      replayFront = { process: event.process || '', category: event.category || '', isGame: !!event.isGame, recording: !!event.worthRecording, reason: event.reason || '' };
+      renderForeground();
+      break;
+    case 'display':
+      showToast(event.present
+        ? `${event.monitor} is back — recording again`
+        : `${event.monitor} went away — the buffer stops until it comes back`,
+        event.present ? 'success' : 'error', 4000);
+      api.captureStatus();
+      break;
+    case 'rebuilding':
+      setReplayStatus(`Restarting — ${event.reason}`, false, true);
+      break;
+    case 'config':
+      // Someone changed the config, and it is not always this panel — the tray menu toggles
+      // capture on and off too, and a panel still holding the old config would hand it straight
+      // back on the next change anyone made here.
+      replayConfig = event.config;
+      applyReplayUi();
+      break;
+    case 'clip-saved':
+      showToast(`✓ Replay saved — ${Math.round(event.durationMs / 1000)}s`, 'success');
+      scanAndRender();
+      break;
+    case 'error':
+      showToast('Replay: ' + event.message, 'error', 4000);
+      break;
+  }
+});
+
+// Keep the status line honest while the panel is open, without polling when it is not.
+setInterval(() => {
+  if (settingsOverlay.classList.contains('open') && replayConfig && replayConfig.enabled) {
+    api.captureStatus();
+  }
+}, 2000);
+
+initReplay();

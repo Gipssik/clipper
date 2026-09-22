@@ -530,6 +530,56 @@
   .enc-seg button.active { background: var(--accent); border-color: var(--accent); color: #0a0a0b; }
   .enc-seg button:disabled { opacity: 0.3; cursor: not-allowed; }
 
+  /* Instant replay */
+  #replay-options { transition: opacity 0.15s; }
+  #replay-options.off { opacity: 0.35; pointer-events: none; }
+  /* The device picker means nothing with the microphone off, and greying it out says so better
+     than leaving it live. */
+  #replay-mic-device-field, #replay-mic-gain-field { transition: opacity 0.15s; }
+  #replay-mic-device-field.off, #replay-mic-gain-field.off { opacity: 0.4; pointer-events: none; }
+  .replay-row { display: flex; gap: 8px; align-items: center; }
+  .replay-row .replay-value {
+    flex: 1 1 auto; min-width: 0; padding: 9px 12px;
+    background: var(--surface2); border: 1px solid var(--border2); border-radius: 6px;
+    color: var(--text2); font-size: calc(12px * var(--font-scale));
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left;
+  }
+  .replay-row button {
+    flex: 0 0 auto; padding: 9px 14px;
+    background: var(--surface2); border: 1px solid var(--border2); border-radius: 6px;
+    color: var(--text2); font-family: 'Syne', sans-serif;
+    font-size: calc(12.5px * var(--font-scale)); font-weight: 600; cursor: pointer;
+    transition: all 0.13s;
+  }
+  .replay-row button:hover { border-color: var(--text3); color: var(--text); }
+  .replay-row button.listening { background: var(--accent); border-color: var(--accent); color: #0a0a0b; }
+  #replay-status {
+    margin-top: 14px; padding: 10px 12px; border-radius: 6px;
+    background: var(--surface2); border: 1px solid var(--border2);
+    color: var(--text3); font-size: calc(11.5px * var(--font-scale));
+    display: flex; align-items: center; gap: 8px;
+  }
+  #replay-status .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text3); flex: 0 0 auto; }
+  #replay-status.live .dot { background: #e94c4c; }
+  #replay-status.live { color: var(--text2); }
+  #replay-status.warn .dot { background: #e0a33e; }
+  #replay-front {
+    margin-top: 10px; padding: 10px 12px; border-radius: 6px;
+    background: var(--surface2); border: 1px solid var(--border2);
+    font-size: calc(11.5px * var(--font-scale)); color: var(--text3);
+  }
+  #replay-front .front-line { color: var(--text2); margin-bottom: 8px; }
+  #replay-front .front-line b { color: var(--text); font-weight: 600; }
+  #replay-front-actions { display: flex; gap: 6px; }
+  #replay-front-actions button {
+    padding: 5px 10px; border-radius: 5px; cursor: pointer;
+    background: transparent; border: 1px solid var(--border2); color: var(--text3);
+    font-family: 'Syne', sans-serif; font-size: calc(11px * var(--font-scale)); font-weight: 600;
+    transition: all 0.13s;
+  }
+  #replay-front-actions button:hover { border-color: var(--text3); color: var(--text); }
+  #replay-front-actions button.on { background: var(--accent); border-color: var(--accent); color: #0a0a0b; }
+
   /* Select + number input */
   .enc-select, .enc-number {
     width: 100%; padding: 10px 12px; background: var(--surface2);
@@ -610,7 +660,11 @@
 
   #settings-modal {
     background: var(--surface); border: 1px solid var(--border2);
-    border-radius: 14px; width: 620px; max-width: 100%; max-height: 90vh;
+    border-radius: 14px; width: 620px; max-width: 100%;
+    /* Fixed rather than fit-to-content: with tabs, sizing to the tallest thing on each one makes
+       the dialog and its footer jump every time you switch, which reads as the window twitching.
+       760px is about what the longest tab needs; past that the tab scrolls. */
+    height: min(760px, 90vh);
     display: flex; flex-direction: column; overflow: hidden;
     box-shadow: 0 32px 80px rgba(0,0,0,0.7);
   }
@@ -628,6 +682,26 @@
     border-radius: 6px; transition: background 0.15s, color 0.15s; flex-shrink: 0;
   }
   #settings-close-btn:hover { background: var(--danger); color: #fff; }
+
+  /* Tabs. Settings grew five sections long, which is further than anyone scrolls looking for one
+     switch; splitting it means the thing you came for is one click away rather than one hunt. */
+  #settings-tabs {
+    display: flex; gap: 2px; flex-shrink: 0;
+    padding: 0 16px; border-bottom: 1px solid var(--border);
+  }
+  .set-tab {
+    appearance: none; background: transparent; border: none;
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+    padding: 12px 12px 11px; cursor: pointer; white-space: nowrap;
+    font-family: 'Syne', sans-serif; font-size: calc(11.5px * var(--font-scale));
+    font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase;
+    color: var(--text3); transition: color 0.15s, border-color 0.15s;
+  }
+  .set-tab:hover:not(.active) { color: var(--text); }
+  .set-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  .set-panel { display: none; }
+  .set-panel.active { display: block; }
 
   #settings-body { padding: 22px 24px 24px; overflow-y: auto; flex: 1; }
   #settings-body::-webkit-scrollbar { width: 6px; }
@@ -966,87 +1040,241 @@
       </button>
     </div>
 
+    <div id="settings-tabs">
+      <button class="set-tab active" data-tab="library">Library</button>
+      <button class="set-tab" data-tab="replay">Instant replay</button>
+      <button class="set-tab" data-tab="encoding">Encoding</button>
+    </div>
+
     <div id="settings-body">
 
-      <div class="set-group">
-        <div class="set-group-label">Appearance</div>
+      <div class="set-panel active" data-panel="library">
 
-        <div class="enc-field">
-          <div class="enc-label"><span>Font size</span><span class="enc-value" id="fontsize-value">100%</span></div>
-          <input class="enc-slider" id="fontsize-slider" type="range" min="80" max="140" step="5" value="100" />
-          <div class="slider-scale"><span>80% — compact</span><span>140% — large</span></div>
-          <div id="font-preview">
-            <div class="fp-row">
-              <span class="fp-name">clip_2026-09-19.mp4</span>
-              <span class="fp-badge">1080p60</span>
+        <div class="set-group">
+          <div class="set-group-label">Appearance</div>
+
+          <div class="enc-field">
+            <div class="enc-label"><span>Font size</span><span class="enc-value" id="fontsize-value">100%</span></div>
+            <input class="enc-slider" id="fontsize-slider" type="range" min="80" max="140" step="5" value="100" />
+            <div class="slider-scale"><span>80% — compact</span><span>140% — large</span></div>
+            <div id="font-preview">
+              <div class="fp-row">
+                <span class="fp-name">clip_2026-09-19.mp4</span>
+                <span class="fp-badge">1080p60</span>
+              </div>
+              <p class="fp-tip">Scales every label, button and tip in the app. Window chrome and icons stay put, so nothing gets clipped.</p>
             </div>
-            <p class="fp-tip">Scales every label, button and tip in the app. Window chrome and icons stay put, so nothing gets clipped.</p>
+          </div>
+
+          <div class="enc-field">
+            <div class="enc-label"><span>Card size</span></div>
+            <div class="enc-seg" id="cardsize-seg">
+              <button data-min="220">Small</button>
+              <button data-min="280" class="active">Medium</button>
+              <button data-min="360">Large</button>
+              <button data-min="460">Huge</button>
+            </div>
+            <div class="enc-tip">How wide each clip card is before the grid wraps to another column. Larger cards mean fewer per row and bigger thumbnails.</div>
           </div>
         </div>
 
-        <div class="enc-field">
-          <div class="enc-label"><span>Card size</span></div>
-          <div class="enc-seg" id="cardsize-seg">
-            <button data-min="220">Small</button>
-            <button data-min="280" class="active">Medium</button>
-            <button data-min="360">Large</button>
-            <button data-min="460">Huge</button>
+        <div class="set-group">
+          <div class="set-group-label">Browsing</div>
+
+          <div class="enc-field">
+            <div class="set-toggle-row" id="hoverpreview-row">
+              <div class="set-toggle-text">
+                <div class="enc-label" style="margin-bottom:6px"><span>Play preview on hover</span></div>
+                <div class="enc-tip" style="margin-top:0">Plays the clip in its card when you hover it. Turn off if scrolling feels heavy on a large folder.</div>
+              </div>
+              <div class="set-switch on" id="hoverpreview-switch"></div>
+            </div>
           </div>
-          <div class="enc-tip">How wide each clip card is before the grid wraps to another column. Larger cards mean fewer per row and bigger thumbnails.</div>
+
+          <div class="enc-field" style="margin-bottom:0">
+            <div class="enc-label"><span>Thumbnail frame</span><span class="enc-value" id="thumbtime-value">3s</span></div>
+            <input class="enc-slider" id="thumbtime-slider" type="range" min="0" max="15" step="1" value="3" />
+            <div class="slider-scale"><span>0s — first frame</span><span>15s — later in</span></div>
+            <div class="enc-tip">Which moment to grab each card's still from. Bump it up if your clips open on a black intro or a loading screen.</div>
+          </div>
         </div>
+
       </div>
 
-      <div class="set-group">
-        <div class="set-group-label">Browsing</div>
+      <div class="set-panel" data-panel="replay">
 
-        <div class="enc-field">
-          <div class="set-toggle-row" id="hoverpreview-row">
-            <div class="set-toggle-text">
-              <div class="enc-label" style="margin-bottom:6px"><span>Play preview on hover</span></div>
-              <div class="enc-tip" style="margin-top:0">Plays the clip in its card when you hover it. Turn off if scrolling feels heavy on a large folder.</div>
+        <div class="set-group">
+          <div class="enc-tip" style="margin-top:0; margin-bottom:18px">
+            Keeps the last stretch of your screen encoded in the background, so a moment you did not know you
+            wanted is still there when you press the hotkey. It runs on your GPU's encode chip rather than the
+            part that draws your game, which is why it costs a few frames rather than a fifth of them.
+          </div>
+
+          <div class="enc-field">
+            <div class="set-toggle-row" id="replay-row">
+              <div class="set-toggle-text">
+                <div class="enc-label" style="margin-bottom:6px"><span>Record in the background</span></div>
+                <div class="enc-tip" style="margin-top:0">Starts the recorder with Clipper and keeps it going after you close the window — the tray icon turns red while it is buffering. Turn off and nothing runs.</div>
+              </div>
+              <div class="set-switch" id="replay-switch"></div>
             </div>
-            <div class="set-switch on" id="hoverpreview-switch"></div>
+          </div>
+
+          <div id="replay-options" class="off">
+
+            <div class="enc-field">
+              <div class="enc-label"><span>Keep the last</span><span class="enc-value" id="replay-buffer-value">1m 00s</span></div>
+              <input class="enc-slider" id="replay-buffer-slider" type="range" min="30" max="600" step="30" value="60" />
+              <div class="slider-scale"><span>30s</span><span>10m</span></div>
+              <div class="enc-tip" id="replay-buffer-tip">How far back the hotkey can reach.</div>
+            </div>
+
+            <div class="enc-field">
+              <div class="enc-label"><span>Quality</span></div>
+              <div class="enc-seg" id="replay-quality-seg">
+                <button data-q="low">720p</button>
+                <button data-q="medium">1080p</button>
+                <button data-q="high" class="active">1080p HQ</button>
+                <button data-q="ultra">1440p</button>
+                <button data-q="native">Native</button>
+              </div>
+              <div class="enc-tip" id="replay-quality-tip"></div>
+            </div>
+
+            <div class="enc-field">
+              <div class="enc-label"><span>Screen</span></div>
+              <select class="enc-select" id="replay-monitor-select"></select>
+              <div class="enc-tip" id="replay-monitor-tip">Which display to record. Changing it restarts the recorder, so whatever is buffered now is lost.</div>
+            </div>
+
+            <div class="enc-field">
+              <div class="enc-label"><span>When to record</span></div>
+              <div class="enc-seg" id="replay-mode-seg">
+                <button data-mode="game" class="active">Only in games</button>
+                <button data-mode="always">Always</button>
+              </div>
+              <div class="enc-tip" id="replay-mode-tip"></div>
+            </div>
+
+            <div class="enc-field">
+              <div class="enc-label"><span>Hotkey</span></div>
+              <div class="replay-row">
+                <span class="replay-value" id="replay-hotkey-value" style="direction:ltr">Ctrl+Alt+F12</span>
+                <button id="replay-hotkey-btn">Change</button>
+              </div>
+              <div class="enc-tip">Saves the buffer wherever you are. A game running as administrator will swallow it — Windows does not deliver hotkeys down to ordinary programs — and there is no way around that but running Clipper as administrator too.</div>
+            </div>
+
+            <div class="enc-field">
+              <div class="enc-label"><span>Save clips to</span></div>
+              <div class="replay-row">
+                <span class="replay-value" id="replay-path-value">…</span>
+                <button id="replay-path-btn">Change</button>
+              </div>
+              <div class="enc-tip">Point this at your clips folder and saved replays show up in the grid on their own.</div>
+            </div>
+
+            <div class="enc-field">
+              <div class="set-toggle-row" id="replay-pergame-row">
+                <div class="set-toggle-text">
+                  <div class="enc-label" style="margin-bottom:6px"><span>A folder per game</span></div>
+                  <div class="enc-tip" style="margin-top:0">Files each clip under the name of the game that was in front. Clipper already reads subfolders as categories, so this sorts your library for free. Anything that is not a game — a browser, a chat window, the desktop — goes to one shared <b>Desktop</b> folder rather than getting a folder of its own.</div>
+                </div>
+                <div class="set-switch on" id="replay-pergame-switch"></div>
+              </div>
+            </div>
+
+            <div class="enc-field">
+              <div class="set-toggle-row" id="replay-audio-row">
+                <div class="set-toggle-text">
+                  <div class="enc-label" style="margin-bottom:6px"><span>Record desktop audio</span></div>
+                  <div class="enc-tip" style="margin-top:0">Everything you can hear &mdash; the game, your call, music. Costs about 24 KB a second.</div>
+                </div>
+                <div class="set-switch on" id="replay-audio-switch"></div>
+              </div>
+            </div>
+
+            <div class="enc-field">
+              <div class="set-toggle-row" id="replay-mic-row">
+                <div class="set-toggle-text">
+                  <div class="enc-label" style="margin-bottom:6px"><span>Record my microphone</span></div>
+                  <div class="enc-tip" style="margin-top:0">Mixes your voice into the same track as the game, so a clip of the round you were calling out in still has you in it. One track rather than two, because most places you would post a clip play the first one and ignore the rest. Changing this rebuilds the recorder, so the buffer starts over.</div>
+                </div>
+                <div class="set-switch on" id="replay-mic-switch"></div>
+              </div>
+            </div>
+
+            <div class="enc-field" id="replay-mic-device-field">
+              <div class="enc-label"><span>Microphone</span></div>
+              <select class="enc-select" id="replay-mic-select"></select>
+              <div class="enc-tip" id="replay-mic-tip">Which one to listen to. Changing it rebuilds the recorder, so the buffer starts over.</div>
+            </div>
+
+            <div class="enc-field" id="replay-mic-gain-field">
+              <div class="enc-label"><span>Microphone boost</span><span class="enc-value" id="replay-mic-gain-value">0 dB</span></div>
+              <input class="enc-slider" id="replay-mic-gain-slider" type="range" min="-12" max="30" step="1" value="0" />
+              <div class="slider-scale"><span>&minus;12 dB</span><span>+30 dB</span></div>
+              <div class="enc-tip" id="replay-mic-gain-tip">Lifts the microphone before it is mixed with the game, for when Windows' own level runs out at 100&percnt; and you are still quiet. It lifts the room noise with it, so take the least that works. Applies straight away and keeps the buffer.</div>
+            </div>
+
+            <div class="enc-field" style="margin-bottom:0">
+              <div class="set-toggle-row" id="replay-notify-row">
+                <div class="set-toggle-text">
+                  <div class="enc-label" style="margin-bottom:6px"><span>Tell me when a clip is saved</span></div>
+                  <div class="enc-tip" style="margin-top:0">A silent Windows notification in the corner of the screen. The hotkey is pressed while you are looking at a game, where Clipper's own toast is somewhere behind it.</div>
+                </div>
+                <div class="set-switch on" id="replay-notify-switch"></div>
+              </div>
+            </div>
+
+            <div id="replay-status"><span class="dot"></span><span id="replay-status-text">Not running</span></div>
+
+            <div id="replay-front">
+              <div class="front-line" id="replay-front-text">Nothing in front yet.</div>
+              <div id="replay-front-actions">
+                <button id="replay-front-game">Treat as a game</button>
+                <button id="replay-front-notgame">Never a game</button>
+              </div>
+            </div>
           </div>
         </div>
 
-        <div class="enc-field" style="margin-bottom:0">
-          <div class="enc-label"><span>Thumbnail frame</span><span class="enc-value" id="thumbtime-value">3s</span></div>
-          <input class="enc-slider" id="thumbtime-slider" type="range" min="0" max="15" step="1" value="3" />
-          <div class="slider-scale"><span>0s — first frame</span><span>15s — later in</span></div>
-          <div class="enc-tip">Which moment to grab each card's still from. Bump it up if your clips open on a black intro or a loading screen.</div>
-        </div>
       </div>
 
-      <div class="set-group">
-        <div class="set-group-label">Encoding</div>
+      <div class="set-panel" data-panel="encoding">
 
-        <div class="enc-field" style="margin-bottom:0">
-          <div class="enc-label"><span>Default encoder</span></div>
-          <select class="enc-select" id="default-encoder-select"></select>
-          <div class="enc-tip" id="default-encoder-tip">Preselected whenever you open Compress or Convert. You can still change it per clip.</div>
-        </div>
-      </div>
+        <div class="set-group">
+          <div class="set-group-label">Defaults</div>
 
-      <div class="set-group">
-        <div class="set-group-label">Export preset</div>
-
-        <div class="enc-tip" style="margin-top:0; margin-bottom:18px">
-          One saved recipe for clips you are about to share. <strong>Export</strong> in a card's ⋮ menu works
-          out what a clip still needs to match it, does only that, and then opens it in Explorer. A clip that
-          already matches is not re-encoded.
-        </div>
-
-        <div id="preset-settings-mount"></div>
-
-        <div class="enc-field" style="margin-bottom:0">
-          <div class="set-toggle-row" id="presetask-row">
-            <div class="set-toggle-text">
-              <div class="enc-label" style="margin-bottom:6px"><span>Ask before every export</span></div>
-              <div class="enc-tip" style="margin-top:0">Shows these options each time, with the plan for that clip, so you can tweak them before it runs. Off means Export just goes.</div>
-            </div>
-            <div class="set-switch" id="presetask-switch"></div>
+          <div class="enc-field" style="margin-bottom:0">
+            <div class="enc-label"><span>Default encoder</span></div>
+            <select class="enc-select" id="default-encoder-select"></select>
+            <div class="enc-tip" id="default-encoder-tip">Preselected whenever you open Compress or Convert. You can still change it per clip.</div>
           </div>
         </div>
+
+        <div class="set-group">
+          <div class="set-group-label">Export preset</div>
+
+          <div class="enc-tip" style="margin-top:0; margin-bottom:18px">
+            One saved recipe for clips you are about to share. <strong>Export</strong> in a card's ⋮ menu works
+            out what a clip still needs to match it, does only that, and then opens it in Explorer. A clip that
+            already matches is not re-encoded.
+          </div>
+
+          <div id="preset-settings-mount"></div>
+
+          <div class="enc-field" style="margin-bottom:0">
+            <div class="set-toggle-row" id="presetask-row">
+              <div class="set-toggle-text">
+                <div class="enc-label" style="margin-bottom:6px"><span>Ask before every export</span></div>
+                <div class="enc-tip" style="margin-top:0">Shows these options each time, with the plan for that clip, so you can tweak them before it runs. Off means Export just goes.</div>
+              </div>
+              <div class="set-switch" id="presetask-switch"></div>
+            </div>
+          </div>
+        </div>
+
       </div>
 
     </div>

@@ -3,6 +3,7 @@
   "version": "3.0.0",
   "description": "Clip browser, trimmer and instant replay recorder",
   "author": "Dmytro Hissa",
+  "license": "SEE LICENSE IN LICENSE",
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",

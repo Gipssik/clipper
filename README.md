@@ -35,6 +35,7 @@ Nothing here phones home, there is no account, and no clip leaves your disk unle
 - [Instant replay](#instant-replay)
 - [Settings](#settings)
 - [Notes](#notes)
+- [License](#license)
 
 ---
 
@@ -320,3 +321,24 @@ All of the above — see [Instant replay](#instant-replay).
   still want the HDR version.
 - **Export never re-encodes to reach a state the clip is already in.** Repackaging a container and
   copying a file are both lossless; only an actual change to the picture costs quality.
+
+---
+
+## License
+
+**[PolyForm Noncommercial 1.0.0](LICENSE)** — use it, copy it, change it, share it, build on it, all
+for free, for any noncommercial purpose. Personal use, hobby projects, study and research are
+explicitly covered, as are charities, schools, public research bodies and government institutions.
+
+**Commercial use is not granted.** If you want to use Clipper, or code from it, in or for a business,
+open an issue and ask.
+
+That restriction is the reason this is *source-available* rather than *open source* in the OSI sense —
+the OSI definition does not permit a field-of-use limit, so GitHub will not show a license badge for
+it. That is the intended trade, not an oversight.
+
+The license covers Clipper's own source only. The third-party pieces keep their own terms, and the
+important one is **ffmpeg**: `ffmpeg-bin/ffmpeg.exe` is a prebuilt full build, which includes GPL
+components, so that binary is **GPLv3**. Clipper runs it as a separate program over the command line
+and links nothing against it. See the THIRD-PARTY section at the bottom of [LICENSE](LICENSE) for the
+full list.

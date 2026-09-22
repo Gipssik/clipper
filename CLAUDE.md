@@ -143,8 +143,11 @@ Notes that cost time to rediscover:
   `scanAndRender()` before asserting on badges or `metaCache`.
 - Fixtures must be **longer than `settings.thumbTime` (default 3 s)** or no still is produced and
   the thumbnail silently stays empty. Make them ~10 s.
-- A harness that writes settings should back up and restore
-  `%APPDATA%/clipper/prefs.json` — it is the live app's config.
+- A harness that writes settings touches a **different profile** from the real app. `userData`
+  comes from `app.name`, and `electron <harness.js>` finds no package.json, so it writes
+  `%APPDATA%/Electron/` while `npm start` writes `%APPDATA%/clipper/`. Good news — the real config
+  is never at risk — but it also means a harness reading back `capture.json` or `prefs.json` is
+  reading its own copy, and a value that looks wrong there usually is not.
 - Build fixtures with `ffmpeg-bin/ffmpeg.exe` into a scratchpad folder; never point a harness at the
   user's real clips folder for anything that writes.
 - The `Content Security Policy` warning about the Google Fonts stylesheet is pre-existing noise.

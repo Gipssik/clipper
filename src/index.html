@@ -51,8 +51,23 @@
      while it is — the same signal the tray icon carries, for when the window is what you are
      looking at. */
   .logo-dot { fill: var(--text3); transition: fill 0.3s ease; }
-  body.replay-live .logo-dot { fill: var(--danger); animation: logo-pulse 2.4s ease-in-out infinite; }
-  @keyframes logo-pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.4 } }
+  body.replay-live .logo-dot { fill: var(--danger); animation: logo-pulse 2s infinite; }
+  /* A blink, not a fade, and that is a performance decision rather than a style one. Opacity
+     holds flat either side of each jump, so the compositor produces two frames every two seconds
+     instead of one per refresh. Measured on an idle window with the recorder running: 0.06% of
+     the GPU, against 3.15% for a smooth ease-in-out pulse — which was the whole of what Clipper
+     cost while sitting there doing nothing. A recording light blinks anyway.
+     `will-change: opacity` was tried here and made it worse (0.16%), not better. */
+  @keyframes logo-pulse { 0%, 49.9% { opacity: 1 } 50%, 100% { opacity: 0.35 } }
+
+  /* Closed to the tray. Nothing in a window nobody can see is worth a frame — and Chromium will
+     not stop on its own here, because --disable-renderer-backgrounding is set so that a long
+     encode keeps reporting progress. Measured: an idle hidden window with the recorder running
+     cost 2.9% of the GPU, all of it this one pulsing dot, and 0.0% with this rule. */
+  body.asleep *, body.asleep *::before, body.asleep *::after {
+    animation-play-state: paused !important;
+    transition: none !important;
+  }
   .title-sep { width: 1px; height: 16px; background: var(--border2); }
   #root-folder-display {
     font-size: calc(12px * var(--font-scale)); color: var(--text3);

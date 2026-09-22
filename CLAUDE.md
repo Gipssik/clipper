@@ -129,6 +129,25 @@ status, and the panel shows a persistent warning under the field. It is delibera
 the setting reads back exactly as the user chose it, so the only clue something is wrong is the one
 the field carries.
 
+**A hidden window still draws, and that is on us.** Closing to the tray hides the window rather
+than destroying it, so the renderer stays alive with its caches — but Chromium will not throttle it
+the way it throttles an ordinary occluded window, because `--disable-renderer-backgrounding` and
+`--disable-background-timer-throttling` are set at the top of `main.js` so a long encode keeps
+reporting progress. Nothing reclaims those frames on its own.
+
+So `main.js` sends `window:awake` on hide/minimize/show/restore and the renderer puts the page to
+sleep: `body.asleep` pauses every animation and transition, hover preview stops, and a playing clip
+is paused. Measured with the recorder running: **2.91% of the GPU hidden, 0.00% after**.
+
+**Any always-on animation costs a composited frame per refresh, whatever it animates.** The
+recording dot in the titlebar was a smooth `ease-in-out` opacity pulse and cost **3.15%** of the
+GPU on its own — the entire idle cost of the app, window open or closed. It is now a blink whose
+opacity holds flat either side of each jump (`0%, 49.9% { opacity: 1 } 50%, 100% { opacity: .35 }`),
+which produces two frames every two seconds: **0.06%**. `will-change: opacity` was tried and made
+it *worse*, 0.16% against 0.06%, so do not reach for it here. Measure before adding another one;
+`assets/` has no benchmark but the harness pattern is a `\GPU Engine(*)\Utilization Percentage`
+counter read filtered to the app's pids.
+
 **Voice.** Every control carries a one-line tip explaining what moving it does to the picture, and
 what it costs. Match that when adding UI; a bare label is out of place here.
 

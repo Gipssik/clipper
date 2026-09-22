@@ -31,6 +31,7 @@ contextBridge.exposeInMainWorld('api', {
   onCaptureEvent:   (cb)      => ipcRenderer.on('capture:event', (_, e) => cb(e)),
   getAutostart:   ()          => ipcRenderer.invoke('app:autostart'),
   setAutostart:   (on)        => ipcRenderer.invoke('app:setAutostart', on),
+  onWindowAwake:  (cb)        => ipcRenderer.on('window:awake', (_, on) => cb(on)),
   minimize:       ()          => ipcRenderer.invoke('window:minimize'),
   maximize:       ()          => ipcRenderer.invoke('window:maximize'),
   close:          ()          => ipcRenderer.invoke('window:close'),

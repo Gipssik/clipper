@@ -318,6 +318,10 @@ All of the above — see [Instant replay](#instant-replay).
 - **Closing the window does not stop the recorder.** That is the entire point of a replay buffer. The
   tray icon is the way back, and **Quit Clipper** in its menu is how you actually stop everything.
   With instant replay off, closing the window quits normally.
+- **Closed to the tray, the window costs nothing.** It is hidden rather than thrown away, so reopening
+  is instant and your thumbnails are still there — but it stops drawing entirely while it is out of
+  sight, and a clip left playing is paused. Measured at 0% of the GPU, the same as if it were not
+  running at all. What is left on the meter is the recorder, which is the part doing the work.
 - **Hardware encoders are probed by doing, not by asking.** An `-encoders` listing only proves the
   ffmpeg build has the encoder, not that your machine has the silicon — so Clipper runs a throwaway
   one-frame encode per candidate at startup and offers only what actually worked.

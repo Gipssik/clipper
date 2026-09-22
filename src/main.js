@@ -108,6 +108,19 @@ function createWindow() {
     e.preventDefault();
     mainWindow.hide();
   });
+
+  // Closing to the tray leaves the renderer alive on purpose — reopening is instant and the
+  // thumbnail cache survives — but a renderer nobody can see should not be drawing. Chromium
+  // would normally throttle an occluded window into the ground; it does not here, because
+  // --disable-renderer-backgrounding is set above so a long encode keeps reporting progress.
+  // So the window says when it is out of sight and the page puts itself to sleep.
+  const awake = (on) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('window:awake', on);
+  };
+  mainWindow.on('hide', () => awake(false));
+  mainWindow.on('minimize', () => awake(false));
+  mainWindow.on('show', () => awake(true));
+  mainWindow.on('restore', () => awake(true));
 }
 
 // Two copies would mean two capture daemons fighting over one segment directory, so the second

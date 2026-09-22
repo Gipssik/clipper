@@ -39,7 +39,20 @@
     display: flex; align-items: center; z-index: 300; -webkit-app-region: drag;
     padding: 0 14px; gap: 12px;
   }
-  .logo { font-size: calc(12px * var(--font-scale)); font-weight: 800; letter-spacing: 0.14em; color: var(--accent); text-transform: uppercase; }
+  .logo {
+    display: flex; align-items: center; gap: 8px;
+    font-size: calc(12px * var(--font-scale)); font-weight: 800; letter-spacing: 0.14em;
+    color: var(--accent); text-transform: uppercase;
+  }
+  /* Deliberately not scaled by --font-scale: the titlebar is a fixed 38px and the mark is the
+     one thing in it that would clip. */
+  .logo-mark { flex: none; }
+  /* The dot in the mark is the recorder. Grey while nothing is buffering, red and breathing
+     while it is — the same signal the tray icon carries, for when the window is what you are
+     looking at. */
+  .logo-dot { fill: var(--text3); transition: fill 0.3s ease; }
+  body.replay-live .logo-dot { fill: var(--danger); animation: logo-pulse 2.4s ease-in-out infinite; }
+  @keyframes logo-pulse { 0%, 100% { opacity: 1 } 50% { opacity: 0.4 } }
   .title-sep { width: 1px; height: 16px; background: var(--border2); }
   #root-folder-display {
     font-size: calc(12px * var(--font-scale)); color: var(--text3);
@@ -773,7 +786,13 @@
 
 <!-- Titlebar -->
 <div id="titlebar">
-  <span class="logo">✂ Clipper</span>
+  <span class="logo">
+    <svg class="logo-mark" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M19.25 8.62A8 8 0 1 0 19.25 15.38" fill="none" stroke="currentColor" stroke-width="4.4" stroke-linecap="round"/>
+      <circle class="logo-dot" cx="12" cy="12" r="2.9"/>
+    </svg>
+    Clipper
+  </span>
   <div class="title-sep"></div>
   <span id="root-folder-display">No folder selected</span>
   <div class="title-spacer"></div>
@@ -1096,6 +1115,20 @@
             <input class="enc-slider" id="thumbtime-slider" type="range" min="0" max="15" step="1" value="3" />
             <div class="slider-scale"><span>0s — first frame</span><span>15s — later in</span></div>
             <div class="enc-tip">Which moment to grab each card's still from. Bump it up if your clips open on a black intro or a loading screen.</div>
+          </div>
+        </div>
+
+        <div class="set-group">
+          <div class="set-group-label">Startup</div>
+
+          <div class="enc-field" style="margin-bottom:0">
+            <div class="set-toggle-row" id="autostart-row">
+              <div class="set-toggle-text">
+                <div class="enc-label" style="margin-bottom:6px"><span>Start with Windows</span></div>
+                <div class="enc-tip" style="margin-top:0">Launches Clipper when you sign in, straight to the tray — no window, nothing in your way. Worth it with instant replay on, since the buffer only reaches back as far as the recorder has been running. Costs a few seconds of your boot and, with replay off, nothing else.</div>
+              </div>
+              <div class="set-switch" id="autostart-switch"></div>
+            </div>
           </div>
         </div>
 

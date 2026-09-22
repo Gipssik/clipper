@@ -1,7 +1,8 @@
 {
   "name": "clipper",
-  "version": "2.2.0",
-  "description": "Fast video clip trimmer",
+  "version": "3.0.0",
+  "description": "Clip browser, trimmer and instant replay recorder",
+  "author": "Dmytro Hissa",
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
@@ -15,10 +16,12 @@
   "build": {
     "appId": "com.clipper.app",
     "productName": "Clipper",
+    "copyright": "Copyright © 2026 Dmytro Hissa",
     "directories": {
       "output": "dist"
     },
     "win": {
+      "icon": "assets/icon.ico",
       "target": [
         { "target": "nsis", "arch": ["x64"] },
         { "target": "portable", "arch": ["x64"] }
@@ -26,11 +29,15 @@
     },
     "nsis": {
       "oneClick": true,
-      "perMachine": false
+      "perMachine": false,
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico"
     },
     "files": [
       "src/**/*",
       "assets/**/*",
+      "!assets/source/**",
       "package.json"
     ],
     "extraResources": [

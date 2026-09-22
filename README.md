@@ -1,176 +1,208 @@
-# ✂ Clipper — Video Trim Tool
+<div align="center">
 
-A fast, minimal desktop app for browsing a folder of video clips, trimming them, and saving or replacing them. Built with Electron + ffmpeg.
+<img src="assets/icon.png" width="96" alt="Clipper" />
+
+# Clipper
+
+**A clips folder you can actually live in — browse, trim, compress, share, and keep the last
+minute of every game you play.**
+
+Windows · Electron + ffmpeg · a Direct3D recorder in Rust
+
+</div>
 
 ---
 
-## Requirements
+Clipper does two things. It is a **library** for the folder your game clips land in — a grid of real
+thumbnails with quality badges, a trimmer that is lossless and instant, and one-click routes to the
+shapes you actually send people. And it is an **instant replay recorder** that keeps the last stretch
+of your screen buffered in the background, so the moment you did not know you wanted is still there
+when you press the hotkey.
 
-- **Node.js** v18+ → https://nodejs.org
-- **ffmpeg.exe** (see below)
-- Windows 10/11 x64
+Nothing here phones home, there is no account, and no clip leaves your disk unless you move it.
 
 ---
 
-## Setup (first time)
+## Table of contents
 
-### 1. Get ffmpeg
+- [Setup](#setup)
+- [The library](#the-library)
+- [Trimming](#trimming)
+- [Compressing a clip](#compressing-a-clip)
+- [Converting AV1 → MP4](#converting-av1--mp4)
+- [Converting HDR → SDR](#converting-hdr--sdr)
+- [Export preset](#export-preset)
+- [Instant replay](#instant-replay)
+- [Settings](#settings)
+- [Notes](#notes)
 
-Download a pre-built ffmpeg binary for Windows:
+---
 
-- Go to https://github.com/BtbN/FFmpeg-Builds/releases
-- Download `ffmpeg-master-latest-win64-gpl.zip` (or any recent release)
-- Extract it
-- Copy **`ffmpeg.exe`** from the `bin/` folder inside the zip
+## Setup
 
-Then place it in the `ffmpeg-bin/` folder of this project:
+**Requirements:** Windows 10/11 x64, and [Node.js](https://nodejs.org) v18+ if you are running from
+source.
 
-```
-clipper/
-  ffmpeg-bin/
-    ffmpeg.exe    ← put it here
-  src/
-  package.json
-  ...
-```
+### Just want to use it
 
-> **Tip:** You can also install ffmpeg system-wide (`winget install ffmpeg` or via Chocolatey: `choco install ffmpeg`) and Clipper will fall back to using it from PATH.
+Grab the latest [release](../../releases). The installer and the portable `.exe` both carry
+everything — ffmpeg and the recorder are bundled.
 
-### 2. Install dependencies
-
-Open a terminal in the `clipper/` folder and run:
+### Running from source
 
 ```bash
+git clone <this repo>      # with Git LFS installed — see the warning below
+cd clipper
 npm install
-```
-
-### 3. Run the app
-
-```bash
 npm start
 ```
 
----
+> **ffmpeg.exe is tracked in Git LFS** (~130 MB). A clone made without LFS installed gets a pointer
+> file instead of a binary, and every single ffmpeg call fails with a confusing error. If you did
+> that already: `git lfs install && git lfs pull`.
+>
+> You can also drop your own `ffmpeg.exe` into `ffmpeg-bin/`, or install one system-wide
+> (`winget install ffmpeg`) — Clipper falls back to `PATH`.
 
-## Build a distributable (optional)
-
-To build a Windows installer or portable .exe:
-
-```bash
-npm run build
-```
-
-Output goes to `dist/`. This creates both an NSIS installer and a portable `.exe`.
-
-For just a portable executable:
+The recorder (`capture-bin/clipper-capture.exe`) ships prebuilt. To rebuild it you need a Rust
+toolchain:
 
 ```bash
-npm run build-portable
+cd capture && cargo build --release
+cp target/release/clipper-capture.exe ../capture-bin/
 ```
 
-> Note: `electron-builder` will automatically bundle `ffmpeg-bin/ffmpeg.exe` into the package if present.
+### Building a distributable
+
+```bash
+npm run build            # NSIS installer + portable .exe, into dist/
+npm run build-portable   # portable .exe only
+```
 
 ---
 
-## How to use
+## The library
 
-1. Click **Open Folder** — select any folder containing video files
-2. Click a clip in the left sidebar to load it
-3. Drag the **yellow handles** on the timeline to set trim in/out points
-4. Click **Preview trim** to watch just the selected portion
-5. When happy:
-   - **Save as new** → prompts for a filename/location
-   - **Replace original** → overwrites the original file in-place
-6. **Show in Explorer** opens the file's location in Windows Explorer
+Point Clipper at the folder your clips land in. **Subfolders become categories** — which is exactly
+how the instant replay recorder files them, so a library sorted by game costs you nothing.
 
-Each card shows a **quality badge** in the corner of its thumbnail — `1080p60`, `720p`, `4K` and so on,
-named after the clip's short side so portrait clips read correctly too. Clips encoded with AV1 get an
-extra green **AV1** badge, and HDR clips get an orange **HDR** (or **HLG**) one.
+Every card shows a real frame from the clip, not a generic icon, and a **quality badge** in the
+corner: `1080p60`, `720p`, `4K`. The badge is named after the clip's *short* side, so portrait clips
+read correctly instead of claiming to be 4K. Clips encoded with AV1 get an extra green **AV1** badge,
+and HDR clips get an orange **HDR** (or **HLG**) one — so you can see, before opening anything, which
+files are going to give somebody trouble.
+
+- **Hover a card** and it plays in place. Turn it off in Settings if scrolling a big folder feels heavy.
+- **Filter by category**, with a search box once you have more games than fit on screen.
+- **Sort** newest or oldest first.
+- **The folder is watched.** A clip saved by the recorder — or by anything else — shows up without a
+  refresh, and a file *rewritten in place* has its card rebuilt: new still, new badges, new size.
+
+The still and the metadata come from a single ffmpeg pass per clip, so the badges cost nothing on top
+of the thumbnail you were getting anyway. Both are lazy, driven by what is actually on screen.
+
+---
+
+## Trimming
+
+Click a clip to open it.
+
+1. Drag the **yellow handles** on the timeline to set the in and out points
+2. **Preview trim** plays just the selection
+3. **Save as new** writes a new file; **Replace original** overwrites in place
+
+Trimming is a **stream copy** — no re-encode, so it is near-instant and completely lossless. The one
+cost: cuts land on keyframe boundaries, so the start can be off by a fraction of a second. That is how
+video works, not a bug.
+
+| Key | |
+| --- | --- |
+| `←` `→` | previous / next clip, without leaving the player |
+| `F` | fullscreen |
+| `M` | mute |
+| `Esc` | close |
 
 ---
 
 ## Compressing a clip
 
-Open a card's **⋮** menu → **Compress…**. The modal shows the clip's current resolution, codec, bitrate
-and size, and gives you:
+A card's **⋮** menu → **Compress…**. The modal opens with the clip's current resolution, codec,
+bitrate and size in front of you, and gives you:
 
-- **Resolution** — keep the original or drop down the ladder to 1440p / 1080p / 720p / 480p (only rungs
-  below the source are offered; upscaling never saves space)
-- **Size control** — *Quality (CRF)* to target a look and let the size fall where it may, or
-  *Target bitrate* to land under a hard upload limit
-- **Framerate**, **audio** (keep / re-encode / strip) and **encoder speed**
-- **Encoder** — defaults to your GPU when one is usable, with CPU x264/x265 always selectable
+- **Resolution** — keep it, or drop down the ladder to 1440p / 1080p / 720p / 480p. Only rungs *below*
+  the source are offered; upscaling has never saved anybody space.
+- **Size control** — *Quality (CRF)* to target a look and let size fall where it may, or *Target
+  bitrate* to land under a hard upload limit.
+- **Framerate**, **audio** (keep / re-encode / strip), and **encoder speed**.
+- **Encoder** — your GPU when it has usable silicon, with CPU x264/x265 always available.
 
-Every control carries a one-line note on what moving it actually does to the picture, and the footer
-shows a live **estimated output size** against the original. The estimate is a model, not a promise —
-real size depends on how much motion the clip has.
+Every control carries a one-line note on what moving it does to the picture, and the footer shows a
+live **estimated output size** against the original. The estimate is a model, not a promise — real
+size depends on how much motion the clip has.
+
+---
 
 ## Converting AV1 → MP4
 
-**Convert to MP4…** only appears in the **⋮** menu for clips that are actually AV1 — for anything else it
-would be a lossy round-trip with nothing gained. It decodes the source and re-encodes it to **H.264 in an
-.mp4**, which every editor, player and upload target accepts. AV1 clips usually get *larger* — that is the
-cost of compatibility, and the modal says so up front.
+**Convert to MP4…** only appears for clips that are actually AV1. For anything else it would be a
+lossy round-trip with nothing gained, so it is not offered.
+
+It re-encodes to **H.264 in an .mp4**, which every editor, player and upload target accepts. AV1 clips
+usually get *larger* — that is the price of compatibility, and the modal says so before you start.
+
+---
 
 ## Converting HDR → SDR
 
-Game capture on an HDR display records the clip in HDR, graded against a PQ or HLG curve and the wide
-bt2020 gamut. Anything that is not an HDR screen ignores that grading and shows the raw values, which is
-why the clip looks **grey, flat and washed out** the moment you send it to a friend. Re-encoding alone
-does not fix it — the picture has to be converted.
+Capture on an HDR display records the clip in HDR, graded against a PQ or HLG curve and the wide
+bt2020 gamut. Anything that is not an HDR screen ignores that grading and shows the raw values, which
+is why the clip looks **grey, flat and washed out** the moment you send it to a friend. Re-encoding
+alone does not fix it — the picture has to be converted.
 
-**Convert HDR → SDR…** appears in the **⋮** menu for clips that are actually HDR. It takes the picture
-back to linear light, maps the bt2020 gamut to bt709, compresses the brightness into SDR range and
-re-encodes to **H.264 in an .mp4**, correctly tagged bt709 so nothing downstream second-guesses it.
-
-Four options, each with a note on what it costs:
+**Convert HDR → SDR…** takes the picture back to linear light, maps bt2020 → bt709, compresses the
+brightness into SDR range, and re-encodes to H.264 **correctly tagged bt709** so nothing downstream
+second-guesses it. That last part matters: without the re-tag, ffmpeg copies the source's colour tags
+and the result still claims to be HDR.
 
 | Mode | What it does |
 | --- | --- |
-| **Keep HDR** | Leaves the dynamic range alone. The output stays HDR — and stays grey on SDR screens. |
-| **Balanced** | Holds midtone brightness close to the original and only rolls off the top highlights. The closest match to how the game looked, and the default. |
+| **Keep HDR** | Leaves the dynamic range alone. Stays HDR — and stays grey on SDR screens. |
+| **Balanced** | Holds midtone brightness close to the original and rolls off only the top highlights. The closest match to how the game looked, and the default. |
 | **Filmic** | Filmic S-curve that protects detail in skies, explosions and muzzle flashes, at the cost of darkening the whole picture. |
 | **Punchy** | Leaves everything below SDR white exactly as graded and hard-clips above it. Most contrast, no highlight detail. |
 
-The same control appears in **Compress** whenever the source is HDR, switched on by default — compressing
-an HDR clip to 8-bit without tone mapping is exactly what produces the washed-out result. Tone mapping
-needs an ffmpeg with the `zscale` filter (libzimg); builds without it say so instead of offering the
-option.
+The same control appears in **Compress** whenever the source is HDR, switched on by default —
+compressing an HDR clip to 8-bit without tone mapping is precisely what produces the washed-out
+result. Tone mapping needs an ffmpeg with the `zscale` filter (libzimg); builds without it say so
+rather than silently doing nothing.
 
-All three actions offer **Save as new** (writes `clip_720p.mp4` / `clip_h264.mp4` / `clip_sdr.mp4` next to the original) and
-**Replace original** (keeps the original's name; if the container changes, the old file is removed).
-Long encodes show a progress bar with speed and time remaining, and can be cancelled — a cancelled run
-leaves nothing behind.
+All three actions offer **Save as new** (`clip_720p.mp4`, `clip_h264.mp4`, `clip_sdr.mp4` next to the
+original) and **Replace original**. Long encodes show progress with speed and time remaining, and can
+be cancelled — a cancelled run leaves nothing behind.
 
 ---
 
 ## Export preset
 
-The other actions each answer one question. **Export** answers the whole thing: *get this clip
-into the shape I send people, and open it.*
+The other actions each answer one question. **Export** answers the whole thing: *get this clip into
+the shape I send people, and open it.*
 
-Set the recipe once — resolution cap, codec, dynamic range, quality, and whether to write a new file
-or replace the original. After that, **Export** in a card's ⋮ menu carries the preset in its label
-(`Export · 1080p · H.264 · SDR`) so you know what it will do before clicking.
+Set the recipe once — resolution cap, codec, dynamic range, quality, new file or replace. After that,
+**Export** carries the preset in its menu label (`Export · 1080p · H.264 · SDR`), so you know what it
+will do before you click it.
 
-What makes it worth having is what it *doesn't* do. Export compares the clip to the preset and takes
-the shortest route there:
+What makes it worth having is what it *doesn't* do:
 
 | The clip | What actually happens |
 | --- | --- |
-| Already matches in every way | Nothing is re-encoded. Shown in Explorer as-is (or copied, if the preset saves a new file). |
+| Already matches in every way | Nothing is re-encoded. Revealed in Explorer as-is (or copied, if the preset saves a new file). |
 | Only the container is wrong (`.mkv`, `.mov`) | Repackaged to `.mp4` with `-c copy`. Bit-for-bit the same video, in about a tenth of a second. |
-| Needs a downscale, a codec change, a tone map, or any mix | **One** ffmpeg pass doing all of it at once. |
+| Needs a downscale, a codec change, a tone map, or any mix of them | **One** ffmpeg pass doing all of it at once. |
 
 That last row is the important one: chaining separate encodes would stack generation loss to arrive at
 exactly the same frames, so scaling, tone mapping and the codec change all happen in a single pass.
 
-When it finishes — or immediately, if there was nothing to do — the file is revealed in Explorer, the
-same way **Show in Explorer** does it.
-
-The first time you hit Export, the preset modal opens so you can set it up; it saves and runs in one
-go. After that Export just goes, unless you turn on **Ask before every export** in Settings, which
-shows the options again each time along with the exact plan for that clip:
+Turn on **Ask before every export** and you get the options each time, along with the exact plan:
 
 ```
 FOR THIS CLIP
@@ -181,56 +213,110 @@ FOR THIS CLIP
 
 Lines with `→` are work that will happen; lines with `·` are things deliberately skipped.
 
-### Codec choice
+**Codec choice.** **H.264** opens in literally everything and is the right default for clips you are
+sending to people. **AV1** produces distinctly smaller files at matched quality, and on a GPU with an
+AV1 encoder (RTX 40-series and newer, Arc, RDNA3) it is fast too — Clipper probes for `av1_nvenc`,
+`av1_qsv` and `av1_amf` and falls back to SVT-AV1 on the CPU. The catch is support: older phones,
+browsers and editors will not open it.
 
-**H.264** opens in literally everything and is the right default for clips you are sending to people.
-**AV1** produces distinctly smaller files at matched quality — on a GPU with an AV1 encoder (RTX 40
-series and newer, Arc, RDNA3) it is also fast, since Clipper probes for `av1_nvenc`, `av1_qsv` and
-`av1_amf` at startup and falls back to SVT-AV1 on the CPU. The catch is support: older phones,
-browsers and editors will not open AV1. Both codecs are also available per-clip in **Compress**.
+Resolution is a **cap**, not a target. A 720p clip under a 1080p preset is left alone.
 
-Resolution is a *cap*, not a target — a 720p clip under a 1080p preset is left alone, never upscaled.
+---
+
+## Instant replay
+
+Turn on **Record in the background** in Settings and Clipper keeps the last stretch of your screen
+encoded in a ring buffer. Press the hotkey — `Ctrl+Alt+F12` by default, rebindable — and that stretch
+becomes a clip in your library. The tray icon turns red while the buffer is live, and so does the dot
+in the titlebar mark.
+
+It is a native Direct3D 11 recorder, not ffmpeg. Frames are captured, scaled, tone mapped and packed
+to NV12 in **one GPU pass**, then encoded by your card's dedicated encode silicon through Media
+Foundation — NVIDIA, AMD or Intel, whichever you have. Nothing but the compressed bytes ever touches
+system memory. The cost is a few frames per second, not a fifth of them.
+
+**It knows what a game is.** In *Only in games* mode the pipeline only exists while a game actually
+has focus, so reading email does not burn encode time or trickle writes to your disk. "Fullscreen" is
+not the test — a maximised terminal, a chat window someone pressed F11 in and a full-screen browser
+are all fullscreen and none of them is a game. Instead the question is asked in layers: your own
+include/exclude lists first, then a built-in list of things that are never games, then Windows' own
+Game Bar registry, then sustained 3D load on the GPU. The Settings panel shows you what it thinks is
+in front right now, with **Treat as a game** / **Never a game** buttons when it gets one wrong.
+
+**It knows what the game is called.** A folder named `RuntimeClient-Win64-Shipping` is not a library
+sorted by game, so the name is read from wherever a human already wrote it down — Game Bar's registry,
+the Store, the executable's own version info — rather than guessed from the filename. With **a folder
+per game** on, clips file themselves into categories Clipper already reads. Anything that is not a
+game goes to one shared **Desktop** folder rather than getting a folder of its own.
+
+| Setting | What it costs |
+| --- | --- |
+| **Keep the last** | 30 s to 10 minutes. The buffer lives on disk, not in RAM — a minute at 1080p HQ is about 150 MB of rolling writes, which is nothing for an SSD and would be a real cost in RAM. |
+| **Quality** | 720p60 / 1080p60 / **1080p HQ** / 1440p60 / native. The panel quotes megabytes-per-minute for each, because that is the number you recognise from your clips folder. |
+| **Screen** | Which display to record. |
+| **When to record** | Only in games, or always. |
+| **Desktop audio** | Everything you can hear. About 24 KB/s. |
+| **Microphone** | Mixed into the *same* track as the game, with an optional boost for when Windows' own level runs out at 100%. One track, because most places you post a clip play the first one and silently ignore the rest. |
+| **Tell me when a clip is saved** | A silent Windows toast. The hotkey gets pressed while you are looking at a game, where Clipper's own toast is somewhere behind it. |
+
+**It stays up.** A display switched to HDR, a monitor turned off to spare an OLED, a resolution
+change, a driver hiccup — none of those is an error worth quitting on. Each one rebuilds the pipeline
+and carries on. Almost every setting applies without a restart, because a restart drops the ring, and
+losing the last minute of footage to a slider is a bad trade.
+
+**The recorder is a child process** of Clipper and exits with it, so there is no way to end up with an
+orphan quietly writing to your disk. In Task Manager it appears nested under Clipper as *Clipper
+Instant Replay*.
+
+> **One known limitation, with no fix from user space:** Windows never delivers a hotkey to an
+> ordinary program while something running as administrator has focus. A game launched elevated, or
+> one whose anti-cheat runs elevated, will swallow the combination silently. Running Clipper as
+> administrator too is the only way around it.
 
 ---
 
 ## Settings
 
-The **⚙** button in the titlebar opens Settings. Everything saves as you change it.
+The **⚙** button in the titlebar. Everything saves as you change it.
+
+### Library
 
 | Setting | What it does |
 | --- | --- |
-| **Font size** | Scales every label, button and tip in the app, 80%–140%, with a live preview. Icons and window chrome stay fixed so nothing gets clipped. |
-| **Card size** | How wide a clip card gets before the grid wraps — Small / Medium / Large / Huge. Worth turning up on a big monitor. |
+| **Font size** | Scales every label, button and tip, 80%–140%, with a live preview. Icons and window chrome stay fixed so nothing gets clipped. |
+| **Card size** | How wide a card gets before the grid wraps — Small / Medium / Large / Huge. |
 | **Play preview on hover** | Turn off if scrolling a large folder feels heavy. |
-| **Thumbnail frame** | Which second of each clip to grab its still from. Bump it up if your clips open on a black intro or a loading screen. Changing it re-grabs the visible stills. |
-| **Default encoder** | Preselected whenever you open Compress or Convert. *Automatic* prefers your GPU when one is usable. You can still override it per clip. |
-| **Export preset** | The saved recipe **Export** uses — resolution cap, codec, dynamic range and SDR look, quality, and new file vs. replace. Editing it here takes effect immediately. |
-| **Ask before every export** | Shows the preset options on every export, with the plan for that clip, instead of just running. Off by default. |
+| **Thumbnail frame** | Which second of each clip to grab its still from. Bump it up if your clips open on a black intro or a loading screen. |
+| **Start with Windows** | Launches Clipper when you sign in, straight to the tray — no window. Worth it with instant replay on, since the buffer only reaches back as far as the recorder has been running. |
 
----
+### Instant replay
 
-## Supported formats
+All of the above — see [Instant replay](#instant-replay).
 
-Any format ffmpeg supports: `.mp4`, `.mov`, `.avi`, `.mkv`, `.webm`, `.wmv`, `.flv`, `.m4v`, `.mts`, `.m2ts`
+### Encoding
+
+| Setting | What it does |
+| --- | --- |
+| **Default encoder** | Preselected whenever you open Compress or Convert. *Automatic* prefers your GPU when one is usable. Still overridable per clip. |
+| **Export preset** | The saved recipe **Export** uses. Editing it here takes effect immediately. |
+| **Ask before every export** | Shows the preset options on every export, with the plan for that clip. Off by default. |
 
 ---
 
 ## Notes
 
-- Trimming uses **stream copy** (`-c copy`) — it's near-instant and lossless. There may be slight inaccuracy at the cut points for non-keyframe boundaries (this is a fundamental video encoding constraint, not a bug).
-- No re-encoding means no quality loss and no waiting.
-- **Compress** and **Convert**, unlike trimming, do re-encode — they take real time and lose a little
-  quality by definition. Hardware encoding (NVENC / QuickSync / AMF) is typically 5–10× faster than CPU
-  x264 but produces somewhat larger files at the same quality setting.
-- Clipper probes for usable hardware encoders at startup by running a throwaway one-frame encode, so the
-  list only offers encoders this machine can actually use.
-- HDR detection reads the clip's transfer curve (`smpte2084` for HDR10, `arib-std-b67` for HLG), not just
-  its bit depth or gamut — a 10-bit bt2020 clip with an ordinary curve is wide-gamut, not HDR, and is
-  left alone.
-- Tone mapping is one-way. The SDR copy cannot be turned back into HDR, so keep the original if you still
-  want the HDR version.
-- A card is rebuilt when the file behind it changes, not just when it appears or disappears. Replacing a
-  clip in place refreshes its badges, still, size and menu — and so does an edit made outside Clipper,
-  since the folder watcher triggers the same rescan.
-- **Export** never re-encodes to reach a state the clip is already in. Repackaging a container and copying
-  a file are both lossless; only an actual picture change costs quality.
+- **Supported formats:** anything ffmpeg opens — `.mp4`, `.mov`, `.avi`, `.mkv`, `.webm`, `.wmv`,
+  `.flv`, `.m4v`, `.mts`, `.m2ts`.
+- **Closing the window does not stop the recorder.** That is the entire point of a replay buffer. The
+  tray icon is the way back, and **Quit Clipper** in its menu is how you actually stop everything.
+  With instant replay off, closing the window quits normally.
+- **Hardware encoders are probed by doing, not by asking.** An `-encoders` listing only proves the
+  ffmpeg build has the encoder, not that your machine has the silicon — so Clipper runs a throwaway
+  one-frame encode per candidate at startup and offers only what actually worked.
+- **HDR is detected by transfer curve** (`smpte2084` for HDR10, `arib-std-b67` for HLG), not by bit
+  depth or gamut. A 10-bit bt2020 clip with an ordinary curve is wide-gamut, not HDR, and is left
+  alone.
+- **Tone mapping is one-way.** The SDR copy cannot be turned back into HDR. Keep the original if you
+  still want the HDR version.
+- **Export never re-encodes to reach a state the clip is already in.** Repackaging a container and
+  copying a file are both lossless; only an actual change to the picture costs quality.

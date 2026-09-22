@@ -63,3 +63,8 @@ opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
+
+[build-dependencies]
+# Stamps the version resource and icon onto the exe; see build.rs. `toml` is a default feature
+# that only exists to read package metadata out of this file, which build.rs sets by hand.
+winresource = { version = "0.1.31", default-features = false }

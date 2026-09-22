@@ -805,6 +805,7 @@ setTimeout(async () => {
   const prefs = await api.loadPrefs();
   if (prefs?.settings) settings = { ...SETTINGS_DEFAULTS, ...prefs.settings };
   applySettings();
+  refreshAutostart();
   if (prefs?.volume != null) applyVolume(prefs.volume, prefs.muted ?? false);
   if (prefs?.lastFolder) {
     rootFolder = prefs.lastFolder;
@@ -1397,6 +1398,8 @@ const hoverpreviewRow   = document.getElementById('hoverpreview-row');
 const hoverpreviewSwitch= document.getElementById('hoverpreview-switch');
 const thumbtimeSlider   = document.getElementById('thumbtime-slider');
 const thumbtimeValue    = document.getElementById('thumbtime-value');
+const autostartRow      = document.getElementById('autostart-row');
+const autostartSwitch   = document.getElementById('autostart-switch');
 const defaultEncoderSel = document.getElementById('default-encoder-select');
 
 const SETTINGS_DEFAULTS = {
@@ -1489,6 +1492,21 @@ hoverpreviewRow.addEventListener('click', () => {
   if (!settings.hoverPreview) stopHoverPreview();
   applySettings();
   persistSettings();
+});
+
+// Start with Windows lives in the registry, not in prefs.json, so it is read back from Windows
+// rather than mirrored here — and Reset leaves it alone. Resetting the look of a grid is not a
+// reason to silently remove something from somebody's sign-in.
+async function refreshAutostart() {
+  autostartSwitch.classList.toggle('on', await api.getAutostart());
+}
+
+autostartRow.addEventListener('click', async () => {
+  const want = !autostartSwitch.classList.contains('on');
+  // Paint the answer Windows gives, not the one we asked for: a locked-down machine can refuse.
+  const got = await api.setAutostart(want);
+  autostartSwitch.classList.toggle('on', got);
+  if (got !== want) showToast('Windows would not change the startup entry', 'error');
 });
 
 thumbtimeSlider.addEventListener('input', () => {
@@ -2021,6 +2039,13 @@ function tierMbPerMinute(tier) {
 let replayConfig = null;
 let replayCapturing = false;
 
+// The dot in the titlebar mark is the recorder's light. Settings is where the detail lives, but
+// the whole point of a buffer is that you are not looking at Settings when it matters.
+function setReplayCapturing(on) {
+  replayCapturing = !!on;
+  document.body.classList.toggle('replay-live', replayCapturing);
+}
+
 function formatReplayDuration(seconds) {
   if (seconds < 60) return seconds + 's';
   const m = Math.floor(seconds / 60), s = seconds % 60;
@@ -2351,7 +2376,7 @@ async function initReplay() {
 api.onCaptureEvent((event) => {
   switch (event.event) {
     case 'status':
-      replayCapturing = event.recording;
+      setReplayCapturing(event.recording);
       replayFront = { process: event.foreground || '', category: event.category || '', isGame: !!event.isGame, recording: !!event.worthRecording, reason: event.reason || '' };
       replayMicState = {
         active: !!event.micActive,
@@ -2377,7 +2402,7 @@ api.onCaptureEvent((event) => {
       }
       break;
     case 'state':
-      replayCapturing = event.recording;
+      setReplayCapturing(event.recording);
       api.captureStatus();
       break;
     case 'foreground':

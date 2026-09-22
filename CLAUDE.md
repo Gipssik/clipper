@@ -5,9 +5,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 Clipper is a Windows Electron app for browsing a folder of game clips, trimming them, and
-re-encoding them for sharing. Four files do everything: `src/main.js`, `src/preload.js`,
-`src/renderer.js`, `src/index.html`. No framework, no bundler, no transpile step — `npm start`
-runs `src/` directly, and electron-builder is only involved when packaging.
+re-encoding them for sharing — plus an always-on instant replay recorder.
+
+**Two halves, and they are not the same kind of code.** The app is four files: `src/main.js`,
+`src/preload.js`, `src/renderer.js`, `src/index.html`. No framework, no bundler, no transpile step —
+`npm start` runs `src/` directly, and electron-builder is only involved when packaging. The recorder
+is a separate Rust crate in `capture/` that builds to `clipper-capture.exe`, talks Direct3D 11 and
+Media Foundation, and is driven over a named pipe. **`capture/DESIGN.md` is the document for that
+half** — it is long, and it is the reference, not this file.
 
 ## Commands
 
@@ -16,11 +21,15 @@ npm start              # run the app
 npm run build          # electron-builder --win --x64 -> dist/ (NSIS installer + portable .exe)
 npm run build-portable # portable .exe only
 node --check src/main.js   # the only static check available; there is no linter or test runner
+
+cd capture && cargo build --release      # the recorder; copy the exe to capture-bin/ to ship it
+python assets/source/mkicons.py          # regenerate every icon from assets/source/icon.png
 ```
 
 `ffmpeg-bin/ffmpeg.exe` is tracked in **Git LFS** (~130 MB) and bundled via electron-builder
 `extraResources`. A clone without LFS gets a pointer file and every ffmpeg call fails with a
-confusing error.
+confusing error. `capture-bin/clipper-capture.exe` is the same story — `*.exe` is an LFS filter, so
+rebuilding the recorder means committing an LFS object, not a 1.2 MB blob.
 
 ## Architecture
 
@@ -67,6 +76,34 @@ cheapest route: nothing, remux, or one encode. The preset control panel is built
 factory, `buildPresetUi()`, and mounted twice — in Settings and in the export modal — so the two
 copies cannot drift. The export modal borrows the encode modal's chrome through comma-joined CSS
 selectors in `index.html` rather than duplicated rules.
+
+**Icons are generated, not hand-made.** `assets/source/icon.png` is the only artwork; everything
+else in `assets/` — `icon.ico`, `icon.png`, `tray.png`, `tray-idle.png` — comes out of
+`assets/source/mkicons.py`, which scales with ffmpeg and writes the PNG and ICO containers itself
+(no PIL, no ImageMagick on this machine). Edit the master and re-run it; do not hand-edit the
+outputs. Two things that script knows and a replacement would have to relearn: electron-builder
+**rejects an `.ico` without a 256×256 entry**, and the tray icons get their alpha by
+unpremultiplying against the master's black background rather than by colour-keying, which is what
+keeps a 16px mark from looking fringed. `assets/source/` is excluded from the package via a
+`!assets/source/**` filter — the master is repo history, not payload.
+
+The same `assets/icon.ico` is compiled into `clipper-capture.exe` by `capture/build.rs`, along with
+a version resource. That resource is not cosmetic: `FileDescription` is what Task Manager prints in
+its Name column, and without it an always-on recorder shows up in somebody's process list as an
+anonymous `clipper-capture.exe` with a blank Description — the exact shape of a thing you kill on
+sight. It reads **Clipper Instant Replay**, nested under Clipper because `startCaptureDaemon()`
+spawns it as an ordinary child (`detached: false`).
+
+**Start with Windows.** `app.setLoginItemSettings` with an explicit `name: 'Clipper'`, because the
+default names the registry value after the app user model id and Task Manager's Startup tab then
+lists it as `com.clipper.app`. The registration always carries `--hidden`, which `createWindow()`
+turns into `show: false`.
+
+Read the state back with **`executableWillLaunchAtLogin`, never `openAtLogin`** — this costs an hour
+to rediscover. On Windows `openAtLogin` is computed by comparing the registered command line against
+the `args` you pass in, and Electron drops `--hidden` from the args it parses back out of the
+registry. The comparison therefore always fails: the entry is written correctly and launches the app
+every morning, while the switch in Settings reads off.
 
 **Voice.** Every control carries a one-line tip explaining what moving it does to the picture, and
 what it costs. Match that when adding UI; a bare label is out of place here.

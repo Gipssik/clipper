@@ -38,6 +38,51 @@ function savePrefs(prefs) {
   } catch {}
 }
 
+// ── Start with Windows ────────────────────────────────────────────────────────
+// Registered through Electron's login-item API rather than a shortcut dropped in the Startup
+// folder, so switching it off actually removes it again.
+//
+// The registration always carries --hidden. Starting at boot is worth doing for the replay
+// buffer, which can only reach back as far as it has been running; a window in your face at
+// sign-in is not what anyone asked for, and the tray icon is already the way back.
+const HIDDEN_FLAG = '--hidden';
+const startedHidden = process.argv.includes(HIDDEN_FLAG);
+
+// Packaged, process.execPath is Clipper.exe and the flag is the whole of it. Run from source it
+// is electron.exe, which has no idea which project to open unless it is handed back.
+function loginItem(openAtLogin) {
+  return {
+    openAtLogin,
+    // Without this the registry value is named after the app user model id, so Task Manager's
+    // Startup tab lists the entry as `com.clipper.app`.
+    name: 'Clipper',
+    path: process.execPath,
+    args: app.isPackaged ? [HIDDEN_FLAG] : [path.resolve(app.getAppPath()), HIDDEN_FLAG],
+  };
+}
+
+// Read back from Windows rather than from prefs.json. The registry entry is the thing that is
+// actually true, and it can be removed from outside the app.
+//
+// `openAtLogin` is the obvious field and the wrong one: on Windows it is computed by comparing
+// the registered command line against the `args` passed here, and Electron drops --hidden from
+// the args it parses back out of the registry. The comparison therefore always fails and the
+// switch reads off while the entry sits there launching the app every morning.
+// `executableWillLaunchAtLogin` asks the question actually being asked — would this exe start at
+// login, whatever its arguments — and Clipper only ever registers the one entry.
+function getAutostart() {
+  try {
+    const s = app.getLoginItemSettings(loginItem(true));
+    return !!(s.executableWillLaunchAtLogin || s.openAtLogin);
+  } catch { return false; }
+}
+
+ipcMain.handle('app:autostart', () => getAutostart());
+ipcMain.handle('app:setAutostart', (_, on) => {
+  try { app.setLoginItemSettings(loginItem(!!on)); } catch {}
+  return getAutostart();
+});
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
@@ -45,6 +90,7 @@ function createWindow() {
     minWidth: 900,
     minHeight: 600,
     frame: false,
+    icon: path.join(__dirname, '..', 'assets', 'icon.ico'),
     backgroundColor: '#0a0a0b',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -53,7 +99,7 @@ function createWindow() {
       backgroundThrottling: false,
       v8CacheOptions: 'bypassHeatCheck',
     },
-    show: true,
+    show: !startedHidden,
   });
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
 

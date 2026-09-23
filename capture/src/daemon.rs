@@ -386,11 +386,21 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
         }
     };
 
+    // The chosen display being absent at startup is the same situation as it going away later, and
+    // gets the same answer: wait for it. It is the ordinary case at boot on a desk where the main
+    // screen is switched off at the wall — exiting here left nothing recording once it came on.
+    // Until then `monitor` stands in with whatever display exists, so the loop has a handle to hold;
+    // nothing is captured from it, because `display_present` gates the pipeline.
     let mut selector = monitor_selector(&config);
     let all = monitors::list()?;
-    let mut monitor =
-        monitors::resolve(&all, &selector).ok_or("no monitor matched the configured selection")?;
-    let mut display_present = true;
+    let wanted = monitors::resolve(&all, &selector);
+    let mut display_present = wanted.is_some();
+    let mut monitor = wanted
+        .or_else(|| monitors::resolve(&all, ""))
+        .ok_or("no displays at all")?;
+    if !display_present {
+        crate::lifecycle::log(&format!("{selector} is not connected; waiting for it"));
+    }
 
     let mut key = hotkey::Hotkey::register(&config.hotkey);
     if let Err(e) = &key {
@@ -701,7 +711,7 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
                 }
                 Command::Status => emit(status(
                     &config,
-                    &monitor,
+                    shown(&monitor, &selector, display_present),
                     &panel,
                     display_present,
                     pipeline.as_ref(),
@@ -730,10 +740,13 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
                             collect(&mut totals, &p);
                         }
                         selector = monitor_selector(&next);
-                        if let Some(m) = monitors::resolve(&monitors::list()?, &selector) {
-                            monitor = m;
-                            panel = display::probe(monitor.handle, &monitor.device);
-                            display_present = true;
+                        match monitors::list().ok().and_then(|all| monitors::resolve(&all, &selector)) {
+                            Some(m) => {
+                                monitor = m;
+                                panel = display::probe(monitor.handle, &monitor.device);
+                                display_present = true;
+                            }
+                            None => display_present = false,
                         }
                     }
                     // Applied in place rather than through a rebuild, so dragging the slider
@@ -752,7 +765,7 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
                     emit(serde_json::json!({ "event": "reloaded", "restarted": restart }));
                     emit(status(
                         &config,
-                        &monitor,
+                        shown(&monitor, &selector, display_present),
                         &panel,
                         display_present,
                         pipeline.as_ref(),
@@ -830,6 +843,12 @@ fn monitor_selector(config: &Config) -> String {
     }
 }
 
+/// The display the status line talks about. While the chosen one is missing, `monitor` is only a
+/// stand-in, and "waiting for <the screen you can see>" would be exactly backwards.
+fn shown<'a>(monitor: &'a monitors::Monitor, selector: &'a str, present: bool) -> &'a str {
+    if present || selector.is_empty() { &monitor.friendly } else { selector }
+}
+
 fn save_path(config: &Config, front: &foreground::Foreground) -> PathBuf {
     let mut dir = config.output_dir();
     if config.per_game_subfolder {
@@ -845,7 +864,7 @@ fn save_path(config: &Config, front: &foreground::Foreground) -> PathBuf {
 #[allow(clippy::too_many_arguments)]
 fn status(
     config: &Config,
-    monitor: &monitors::Monitor,
+    monitor: &str,
     panel: &display::DisplayHdr,
     display_present: bool,
     pipeline: Option<&Pipeline>,
@@ -861,7 +880,7 @@ fn status(
         "recordMode": config.record_mode,
         "bufferedMs": pipeline.map(|p| p.ring.buffered_90k() * 1000 / ring::HZ).unwrap_or(0),
         "bufferSeconds": config.buffer_seconds,
-        "monitor": monitor.friendly,
+        "monitor": monitor,
         "displayPresent": display_present,
         "hdr": panel,
         "encoder": pipeline.map(|p| p.encoder_name.clone()),

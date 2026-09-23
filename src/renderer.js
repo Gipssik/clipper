@@ -1459,6 +1459,7 @@ async function openSettings() {
   // The probe is lazy, so Settings may be the first thing that needs it.
   if (!encoderList) encoderList = await api.getEncoders();
   buildDefaultEncoderSelect();
+  refreshReplayMonitors();
 }
 function closeSettings() {
   settingsOverlay.classList.remove('open');
@@ -2109,21 +2110,40 @@ function applyReplayUi() {
 
   // An unset monitor means "not chosen yet", not "none" — show the primary rather than a blank
   // dropdown, and record the choice so the daemon and the UI agree on what is being recorded.
+  //
+  // A chosen monitor that is not connected is shown as exactly that. Selecting whatever screen is
+  // on instead would claim that screen is being recorded when the daemon is waiting for the other
+  // one — and would leave no way to pick the screen that is actually on, since it is already
+  // "selected" and choosing it again fires no change.
   const wanted = c.monitor.friendly || c.monitor.device || '';
-  if (replayMonitorSel.options.length) {
-    const known = [...replayMonitorSel.options].some(o => o.value === wanted);
-    if (!known) {
-      const fallback = replayMonitors.find(m => m.primary) || replayMonitors[0];
-      if (fallback) {
-        replayMonitorSel.value = fallback.friendly || fallback.device;
-        if (!wanted) {
-          c.monitor = { device: fallback.device, friendly: fallback.friendly };
-        }
-      }
-    } else {
+  replayMonitorSel.querySelector('option[data-missing]')?.remove();
+  if (replayMonitors.length) {
+    const known = replayMonitors.some(m => (m.friendly || m.device) === wanted);
+    if (known) {
       replayMonitorSel.value = wanted;
+    } else if (wanted) {
+      const option = document.createElement('option');
+      option.value = wanted;
+      option.textContent = `${wanted} — not connected`;
+      option.dataset.missing = '';
+      replayMonitorSel.appendChild(option);
+      replayMonitorSel.value = wanted;
+    } else {
+      const fallback = replayMonitors.find(m => m.primary) || replayMonitors[0];
+      replayMonitorSel.value = fallback.friendly || fallback.device;
+      c.monitor = { device: fallback.device, friendly: fallback.friendly };
     }
   }
+}
+
+// The list is a snapshot of whatever was switched on when it was taken. A screen that is off at
+// boot and on a minute later is the ordinary case on a two-monitor desk, so it is taken again
+// whenever Windows says the set of displays changed, and whenever the panel is opened.
+async function refreshReplayMonitors() {
+  if (!(await api.captureAvailable())) return;
+  replayMonitors = await api.captureMonitors();
+  buildReplayMonitors(replayMonitors);
+  if (replayConfig) applyReplayUi();
 }
 
 async function patchReplay(patch) {
@@ -2447,7 +2467,16 @@ api.onCaptureEvent((event) => {
       replayFront = { process: event.process || '', category: event.category || '', isGame: !!event.isGame, recording: !!event.worthRecording, reason: event.reason || '' };
       renderForeground();
       break;
+    case 'displays-changed':
+      refreshReplayMonitors();
+      break;
+    case 'exited':
+      if (replayConfig && replayConfig.enabled) {
+        setReplayStatus('The recorder stopped unexpectedly — turn instant replay off and on to restart it. Details are in %LOCALAPPDATA%\clipper\capture.log', false, true);
+      }
+      break;
     case 'display':
+      refreshReplayMonitors();
       showToast(event.present
         ? `${event.monitor} is back — recording again`
         : `${event.monitor} went away — the buffer stops until it comes back`,

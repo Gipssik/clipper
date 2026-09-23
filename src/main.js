@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, nativeImage, Notification } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, nativeImage, Notification, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn } = require('child_process');
@@ -141,6 +141,13 @@ app.whenReady().then(() => {
   createWindow();
   setupTray();
   if (loadCaptureConfig().enabled) startCaptureDaemon();
+
+  // The settings panel's list of screens is a snapshot, and a screen switched on after boot is
+  // exactly the one somebody opens the panel to pick. The daemon only watches the display it
+  // records, so it cannot be the one to say another has appeared.
+  for (const change of ['display-added', 'display-removed']) {
+    screen.on(change, () => sendCaptureEvent({ event: 'displays-changed' }));
+  }
 });
 
 // With capture on, closing the window leaves the recorder running — that is the whole point of a
@@ -472,13 +479,16 @@ function startCaptureDaemon() {
   ], { windowsHide: true, stdio: 'ignore', detached: false });
   capture.proc = proc;
 
-  proc.on('exit', () => {
+  proc.on('exit', (code) => {
     if (capture.dying === proc) capture.dying = null;
     if (capture.generation !== generation) return;
     capture.proc = null;
     capture.status = null;
     updateTray();
     sendCaptureEvent({ event: 'state', recording: false });
+    // Nobody asked it to stop, so the panel must not go on saying "Starting…" about a process
+    // that is gone. The reason is in the daemon's log, not in anything it can still tell us.
+    sendCaptureEvent({ event: 'exited', code });
   });
   proc.on('error', (e) => sendCaptureEvent({ event: 'error', message: e.message }));
 

@@ -204,6 +204,69 @@ arrive ahead of the reduction meant for it; recovery is a quarter-second, slow e
 Below the ceiling it does nothing at all, and `cargo test` holds it to that: with headroom every
 sample comes out bit-identical.
 
+**Noise suppression is RNNoise, on the mic leg only, before the boost.** `denoise.rs` wraps
+`nnnoiseless`, the pure-Rust port, so there is no C toolchain and no DLL. It sits between the mic
+endpoint and its track, so the boost lifts a voice that has already been cleaned rather than the
+room it came from, and the desktop leg never passes through it.
+
+**One strength slider, two stages, because the network alone is not enough.** The first version
+was only a dry/wet blend, and it could only ever make the network *weaker*: 100% was plain RNNoise,
+and in use that meant nothing below 90% did much and 100% still let noise through. Measured, the
+network takes pink noise down ~50 dB but flat hiss by 1.5 dB and keyboard clicks by little more,
+because it hears both as consonants. So the slider is now:
+
+* **0–40%, a blend, which is a floor.** Where the network silences a frame, what is left is the dry
+  signal at `1 - wet`, and the floor in dB is the slider's own number. The dry signal covers the
+  network's mistakes on breaths and word tails, which is what keeps the gentle end natural.
+* **40–100%, the full network plus a gate on its voice detector.** The detector does better than
+  the gains, but not by as much as a short probe suggests: over a long run it scores hiss up to
+  0.83 and clicks up to 0.58, against 0.97 and up through a word. Each step closes the gate deeper,
+  `strength - 40` dB down to -60, and raises the score it opens at from 0.5 to 0.9 on a
+  square-root curve — the fooling noises sit in the 0.7s and 0.8s, and on a straight line hiss went
+  from -11 dB at 80% to -69 dB at 100%, which is a switch rather than a slider. It looks two frames
+  ahead so it opens before the first consonant, holds 200 ms after a frame that was certainly voice
+  so it does not clip word tails, and closes at 6 dB per frame so a pause fades rather than snaps.
+  The hold is keyed on a clear decision, not the highest score in the window: over 200 ms of hiss
+  the highest score is routinely high enough to hold a gate open for ever.
+
+`cargo test` holds it to a table. Noise cut / voice cut in dB, two seconds of each noise then voice
+over it:
+
+| | 20% | 40% | 60% | 80% | 100% |
+|---|---|---|---|---|---|
+| pink | -20 / -1.0 | -47 / -1.1 | -66 / -1.1 | -122 / -1.1 | -122 / -1.1 |
+| hiss | -9 / -0.3 | -10 / -0.3 | -10 / -0.3 | -23 / -0.3 | -69 / -0.3 |
+| clicks | -7 / 0.0 | -8 / 0.0 | -28 / 0.0 | -48 / 0.0 | -68 / 0.0 |
+
+and the first 50 ms of a word out of hiss comes through at -1.9 dB with the gate at its hardest. The
+fixtures are synthetic; a real voice scoring lower than the synthetic one is the risk at the top
+of the slider, and the "hear yourself" test is how anybody finds out.
+
+The network runs a frame (480 samples, 10 ms) behind its input, and that is **taken back out, not
+stamped around**. The warm-up frame is discarded, so output sample `n` is input sample `n` and
+carries the endpoint's timestamps unchanged; `cargo test` finds the correlation peak at lag zero to
+hold it there. Keeping the warm-up and stamping the stream a frame early is equally exact on paper,
+and was the first version — but switching suppression on mid-session then handed the mix 10 ms of
+audio for a stretch it had already emitted, and every toggle showed up as 479 dropped frames. What
+the latency and the gate's lookahead do still cost is availability: the mix waits up to four
+frames longer for the mic, which moves the live `audioOffsetMs` by a few tens of milliseconds and
+no clip at all. The lookahead runs at every strength, so crossing 40% never changes how far behind
+the output runs.
+
+It runs at 48 kHz only, which is what the network was trained at. A mix running at 44.1 kHz reports
+`noiseError` instead of feeding it audio at the wrong pitch. Switching it on or off restarts the
+mic track (one splice of a few milliseconds in the voice) and keeps the ring; strength is a blend
+weight and a gate setting and applies in place. Measured cost: 60 s of audio in 0.17 s, 0.28% of
+one core; the gate is a few comparisons per 10 ms and does not show.
+
+**`mictest` is the mixer, not a copy of it.** The panel's "hear yourself" button spawns
+`clipper-capture mictest`, which runs `audio::Mixer` with the desktop leg off and writes the result
+to a WAV — the same suppressor, boost and limiter in the same order, so what plays back is what a
+clip will contain. It is a process of its own rather than a daemon command so the test never
+disturbs the ring, and it shares the microphone with a running daemon, as shared-mode WASAPI
+allows. It stops on a line on stdin or at end of input, so an app that dies mid-test cannot leave
+it listening, and prints a level line ten times a second for the panel's meter.
+
 **The microphone's clock is not our clock.** A USB microphone free-runs, and its packet timestamps
 jitter either side of where a sample count says they should be. The loopback leg covers a gap with
 silence, which is right for an engine that stopped and badly wrong for a device that is merely
@@ -310,7 +373,9 @@ file, written atomically by Electron (temp + rename), schema owned by the daemon
     "desktop": true,
     "mic": true,                   // mixed into the same track
     "micDevice": "",               // "" = follow the system default; otherwise an endpoint id
-    "micGainDb": 0                 // boost before the mix; applied in place, no rebuild
+    "micGainDb": 0,                // boost before the mix; applied in place, no rebuild
+    "noiseSuppression": false,     // RNNoise on the mic; switching restarts the mic track only
+    "noiseStrength": 70            // 0-40 noise floor in dB, 40-100 adds a voice gate; in place
   },
   "toneMap": "auto",               // "auto" | "always" | "off"
   "segmentDir": null,              // null = %LOCALAPPDATA%\clipper\buffer
@@ -444,6 +509,7 @@ thing that can go wrong on its own, and most of them own a counter that says whe
 | file | owns |
 |---|---|
 | `audio.rs` | WASAPI endpoints, the keep-alive stream, rate matching a microphone, the two-source mixer and its limiter |
+| `denoise.rs` | noise suppression on the microphone: RNNoise, the strength blend, and the frame of latency taken back out |
 | `aac.rs` | AAC encode, and the resampler for endpoints Media Foundation will not take directly |
 
 **Disk**
@@ -472,7 +538,9 @@ path can be checked against real pixels.
 
 `windows` for everything (Direct3D11, DXGI, Media Foundation, WASAPI, Graphics.Capture, PDH,
 registry, tool-help, property store), plus `serde` and `serde_json` for the config and the control
-channel. `png` is optional and only for the `dump` feature. There is no error crate: fallible
+channel. `nnnoiseless` is RNNoise for the microphone, pure Rust with its weights compiled in; its
+default features are command-line tools and are off. `png` is optional and only for the `dump`
+feature. There is no error crate: fallible
 paths return `windows::core::Result` or a boxed error, because almost every failure here originates
 in a COM call and wrapping it would only move the message.
 
@@ -875,13 +943,16 @@ were still in place after the actual causes had been found and corrected.
 - **33-bit PTS wraps** after about 26.5 hours. MPEG-TS and ffmpeg's demuxer handle wraparound, but
   a daemon left running for days crosses it, so it is worth testing by starting the clock near the
   wrap point rather than waiting a day to find out.
-- **One microphone, and its boost is a plain gain.** `micGainDb` multiplies, so it lifts the room
-  noise with the voice; there is no gate and no noise suppression here. The limiter stops a boosted
-  mic from clipping the sum, and `micPeakDb` in `status` is what the panel shows so the level can be
+- **One microphone, and its boost is a plain gain.** `micGainDb` multiplies, so without
+  `noiseSuppression` it lifts the room noise with the voice; there is no gate. The limiter stops a
+  boosted mic from clipping the sum, and `micPeakDb` in `status` is what the panel shows so the level can be
   set by looking rather than guessing. Two microphones, or a mic on its own track, are not offered.
 - **The first 60 ms of microphone audio is discarded.** The loopback opens first and the mic's first
   packet is timestamped slightly before the point the mix had already reached, so that overlap goes.
   It is one discard at the start of a session and nothing after it.
+- **Suppression folds the mic to mono.** The network runs once, on the average of the two
+  channels, and writes the result to both. A microphone is mono in all but name — the endpoint
+  duplicates it — but a genuinely stereo one loses its image with suppression on.
 - **Exotic audio endpoints.** 5.1 and 7.1 fold down through the endpoint's channel mask, weighting
   centre and surrounds at -3 dB rather than the easy implementation's "keep front L/R", which would
   silently drop dialogue. 88.2 and 96 kHz endpoints route through Media Foundation's resampler.

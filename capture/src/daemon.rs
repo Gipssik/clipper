@@ -172,6 +172,8 @@ impl Pipeline {
                 mic: config.audio.mic,
                 mic_device: &config.audio.mic_device,
                 mic_gain_db: config.audio.mic_gain_db,
+                noise_suppression: config.audio.noise_suppression,
+                noise_strength: config.audio.noise_strength,
                 ..Default::default()
             })?)
         } else {
@@ -753,6 +755,7 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
                     // does not cost the footage already buffered.
                     if let Some(mixer) = pipeline.as_mut().and_then(|p| p.audio.as_mut()) {
                         mixer.set_mic_gain(next.audio.mic_gain_db);
+                        mixer.set_noise(next.audio.noise_suppression, next.audio.noise_strength);
                     }
                     crate::lifecycle::log(&format!(
                         "config reloaded{}",
@@ -918,6 +921,8 @@ fn status(
         "micClockPpm": pipeline.and_then(|p| p.audio.as_ref()).map(|m| m.mic_clock_ppm()),
         "micRatePpm": pipeline.and_then(|p| p.audio.as_ref()).map(|m| m.mic_rate_ppm()),
         "micGainDb": config.audio.mic_gain_db,
+        "noiseActive": pipeline.and_then(|p| p.audio.as_ref()).map(|m| m.noise_active()),
+        "noiseError": pipeline.and_then(|p| p.audio.as_ref()).and_then(|m| m.noise_error.clone()),
         "micPeakDb": pipeline.and_then(|p| p.audio.as_ref()).and_then(|m| m.mic_peak_db()).map(|v| (v * 10.0).round() / 10.0),
         "limitedFrames": pipeline.and_then(|p| p.audio.as_ref()).map(|m| m.limiter.limited_frames),
         "wouldClipFrames": pipeline.and_then(|p| p.audio.as_ref()).map(|m| m.limiter.would_clip_frames),

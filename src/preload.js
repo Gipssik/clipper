@@ -28,6 +28,8 @@ contextBridge.exposeInMainWorld('api', {
   captureMonitors:  ()        => ipcRenderer.invoke('capture:monitors'),
   captureInputs:    ()        => ipcRenderer.invoke('capture:inputs'),
   captureAvailable: ()        => ipcRenderer.invoke('capture:available'),
+  micTestStart:     ()        => ipcRenderer.invoke('capture:micTestStart'),
+  micTestStop:      ()        => ipcRenderer.invoke('capture:micTestStop'),
   onCaptureEvent:   (cb)      => ipcRenderer.on('capture:event', (_, e) => cb(e)),
   getAutostart:   ()          => ipcRenderer.invoke('app:autostart'),
   setAutostart:   (on)        => ipcRenderer.invoke('app:setAutostart', on),

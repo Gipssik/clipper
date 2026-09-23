@@ -67,6 +67,11 @@ pub struct AudioConfig {
     /// mix rather than at the endpoint, where it would clip against full scale before the limiter
     /// ever saw it.
     pub mic_gain_db: f32,
+    /// RNNoise on the microphone leg. Off by default: it is a network running on every 10 ms of
+    /// voice, it adds a frame of latency, and on a quiet desk it has nothing to do.
+    pub noise_suppression: bool,
+    /// 0–100: a noise floor up to 40, a voice gate above it; see `denoise::setting`.
+    pub noise_strength: f32,
 }
 
 impl Default for AudioConfig {
@@ -76,6 +81,8 @@ impl Default for AudioConfig {
             mic: true,
             mic_device: String::new(),
             mic_gain_db: 0.0,
+            noise_suppression: false,
+            noise_strength: 70.0,
         }
     }
 }
@@ -168,7 +175,8 @@ impl Config {
             || self.tone_map != other.tone_map
             // The microphone's boost is deliberately not in here. It is a slider, and a slider
             // that costs you the buffered minute every time you nudge it is a slider nobody can
-            // set by ear. The mixer takes the new value in place.
+            // set by ear. The mixer takes the new value in place. Noise suppression and its
+            // strength are the same story, for the same reason.
             || self.audio.desktop != other.audio.desktop
             || self.audio.mic != other.audio.mic
             || self.audio.mic_device != other.audio.mic_device

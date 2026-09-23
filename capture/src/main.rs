@@ -22,6 +22,7 @@ mod ipc;
 mod lifecycle;
 mod convert;
 mod d3d;
+mod denoise;
 mod display;
 mod encoder;
 mod hotkey;
@@ -57,6 +58,7 @@ fn run() -> Fallible<()> {
         Some("dump") => cmd_dump(&args[1..]),
         Some("encode") => cmd_encode(&args[1..]),
         Some("audio") => cmd_audio(&args[1..]),
+        Some("mictest") => cmd_mictest(&args[1..]),
         Some("record") => cmd_record(&args[1..]),
         Some("daemon") => cmd_daemon(&args[1..]),
         _ => {
@@ -105,8 +107,15 @@ fn usage() {
     eprintln!("    --mic-device <id>      mix that microphone in; see the `inputs` command");
     eprintln!("    --no-desktop           microphone only");
     eprintln!("    --mic-gain <dB>        boost the microphone before the mix (default 0)");
+    eprintln!("    --noise <0-100>        suppress noise on the microphone at that strength");
     eprintln!("    --wav <file>           also dump the mixed PCM, before AAC touches it");
     eprintln!("    --out <file>           output path");
+    eprintln!("\n  mictest [options]        record the microphone as a clip would hear it, to a .wav\n");
+    eprintln!("    --mic-device <id>      that microphone (default: Windows' default)");
+    eprintln!("    --mic-gain <dB>        boost, as in the recorder");
+    eprintln!("    --noise <0-100>        noise suppression at that strength");
+    eprintln!("    --seconds <n>          stop after n seconds (default 30); a line on stdin stops sooner");
+    eprintln!(r"    --out <file>           default %TEMP%\clipper-capture\mictest.wav");
     eprintln!("\n  record [options]         run the replay buffer; hotkey saves a clip\n");
     eprintln!("    --monitor <name>       as above (default: primary)");
     eprintln!("    --buffer <seconds>     how much to keep (default 60)");
@@ -121,6 +130,7 @@ fn usage() {
     eprintln!("    --mode <m>             always | game (default always)");
     eprintln!("    --no-audio             video only");
     eprintln!("    --no-mic               desktop audio only");
+    eprintln!("    --noise <0-100>        suppress noise on the microphone at that strength");
     eprintln!("    --mic-device <id>      record that microphone; see the `inputs` command");
     eprintln!("    --ipc                  also serve the control pipe");
     eprintln!("\n  daemon [options]        what Clipper launches\n");
@@ -484,6 +494,108 @@ fn write_wav(path: &std::path::Path, pcm: &[i16], rate: u32, channels: u16) -> F
     Ok(())
 }
 
+/// The microphone as a clip will hear it, recorded to a file somebody can listen to.
+///
+/// This is the recorder's own `Mixer` with the desktop leg switched off, not a second audio path
+/// written to look like it: the boost, the suppressor and the limiter are the same code, in the
+/// same order, so what the settings panel plays back is what a saved clip will contain. It runs
+/// as its own process rather than as a daemon command so the test works with instant replay off,
+/// and it shares the microphone with a daemon that is running — WASAPI shared mode is built for
+/// exactly that.
+///
+/// Stops at the first line on stdin, or at end of input, which is also what happens when the app
+/// that started it goes away. A level line goes to stdout ten times a second while it runs, and
+/// one line saying where the file is when it is done.
+fn cmd_mictest(args: &[String]) -> Fallible<()> {
+    use std::io::{BufRead, Write};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let seconds: f64 = number(args, "--seconds", 30.0);
+    let out = flag(args, "--out").map(PathBuf::from).unwrap_or_else(|| {
+        std::env::temp_dir().join("clipper-capture").join("mictest.wav")
+    });
+    let say = |value: serde_json::Value| {
+        let mut stdout = std::io::stdout().lock();
+        let _ = writeln!(stdout, "{value}");
+        let _ = stdout.flush();
+    };
+
+    let mut mixer = audio::Mixer::start(audio::MixerConfig {
+        desktop: false,
+        mic: true,
+        mic_device: flag(args, "--mic-device").unwrap_or(""),
+        mic_gain_db: number(args, "--mic-gain", 0.0),
+        noise_suppression: flag(args, "--noise").is_some(),
+        noise_strength: number(args, "--noise", 70.0),
+        tone_hz: None,
+        keep_alive: false,
+    })?;
+    if let Some(error) = &mixer.mic_error {
+        say(serde_json::json!({ "event": "error", "message": error }));
+        return Ok(());
+    }
+
+    let stop = Arc::new(AtomicBool::new(false));
+    {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            let _ = std::io::stdin().lock().read_line(&mut line);
+            stop.store(true, Ordering::Relaxed);
+        });
+    }
+
+    let freq = clock::qpc_frequency();
+    let mut ticker = clock::Ticker::new(100)?;
+    let started = clock::qpc_now();
+    let mut pcm: Vec<i16> = Vec::new();
+    let mut peak = 0i32;
+    let mut window_peak = 0i32;
+    let mut last_level = 0.0;
+    let db = |p: i32| 20.0 * (p.max(1) as f64 / 32768.0).log10();
+
+    loop {
+        let elapsed = clock::qpc_to_ms(clock::qpc_now() - started, freq) / 1000.0;
+        if stop.load(Ordering::Relaxed) || elapsed >= seconds {
+            break;
+        }
+        ticker.wait();
+        let before = pcm.len();
+        if let Err(e) = mixer.poll(&mut pcm) {
+            say(serde_json::json!({ "event": "error", "message": e.message().to_string() }));
+            return Ok(());
+        }
+        let loudest = pcm[before..].iter().map(|&s| (s as i32).abs()).max().unwrap_or(0);
+        window_peak = window_peak.max(loudest);
+        if elapsed - last_level >= 0.1 {
+            last_level = elapsed;
+            say(serde_json::json!({
+                "event": "level",
+                "peakDb": (db(window_peak) * 10.0).round() / 10.0,
+                "seconds": (elapsed * 10.0).round() / 10.0,
+            }));
+            peak = peak.max(window_peak);
+            window_peak = 0;
+        }
+    }
+    mixer.limiter.flush(&mut pcm);
+    peak = peak.max(window_peak);
+
+    write_wav(&out, &pcm, mixer.rate(), audio::OUT_CHANNELS as u16)?;
+    say(serde_json::json!({
+        "event": "done",
+        "path": out.to_string_lossy(),
+        "seconds": (pcm.len() / audio::OUT_CHANNELS) as f64 / mixer.rate() as f64,
+        "peakDb": (db(peak) * 10.0).round() / 10.0,
+        "device": mixer.mic_name,
+        "noiseActive": mixer.noise_active(),
+        "noiseError": mixer.noise_error,
+    }));
+    Ok(())
+}
+
 fn cmd_audio(args: &[String]) -> Fallible<()> {
     use std::io::Write;
     use std::path::PathBuf;
@@ -502,6 +614,8 @@ fn cmd_audio(args: &[String]) -> Fallible<()> {
         mic: present(args, "--mic") || flag(args, "--mic-device").is_some(),
         mic_device: flag(args, "--mic-device").unwrap_or(""),
         mic_gain_db: number(args, "--mic-gain", 0.0),
+        noise_suppression: flag(args, "--noise").is_some(),
+        noise_strength: number(args, "--noise", 70.0),
         tone_hz: tone,
         keep_alive: !present(args, "--no-keepalive"),
     })?;
@@ -692,6 +806,8 @@ fn config_from_args(args: &[String]) -> config::Config {
     config.audio.mic = !present(args, "--no-audio") && !present(args, "--no-mic");
     config.audio.mic_device = flag(args, "--mic-device").unwrap_or("").to_string();
     config.audio.mic_gain_db = number(args, "--mic-gain", 0.0);
+    config.audio.noise_suppression = flag(args, "--noise").is_some();
+    config.audio.noise_strength = number(args, "--noise", 70.0);
     config.record_mode = flag(args, "--mode").unwrap_or("always").to_string();
     config.per_game_subfolder = present(args, "--per-game");
     config.tone_map = if present(args, "--sdr") { "off".into() } else { "auto".into() };

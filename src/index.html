@@ -570,8 +570,18 @@
   #replay-options.off { opacity: 0.35; pointer-events: none; }
   /* The device picker means nothing with the microphone off, and greying it out says so better
      than leaving it live. */
-  #replay-mic-device-field, #replay-mic-gain-field { transition: opacity 0.15s; }
-  #replay-mic-device-field.off, #replay-mic-gain-field.off { opacity: 0.4; pointer-events: none; }
+  #replay-mic-device-field, #replay-mic-gain-field, #replay-noise-field,
+  #replay-noise-strength-field, #replay-mictest-field { transition: opacity 0.15s; }
+  #replay-mic-device-field.off, #replay-mic-gain-field.off, #replay-noise-field.off,
+  #replay-noise-strength-field.off, #replay-mictest-field.off { opacity: 0.4; pointer-events: none; }
+  /* The test's level meter sits inside the value box, behind its text, so recording has something
+     moving to show that the microphone is hearing you without a second control to look at. */
+  #replay-mictest-value { position: relative; direction: ltr; }
+  #replay-mictest-meter {
+    position: absolute; left: 0; top: 0; bottom: 0; width: 0;
+    background: var(--accent); opacity: 0.18; transition: width 0.08s linear;
+  }
+  #replay-mictest-text { position: relative; }
   .replay-row { display: flex; gap: 8px; align-items: center; }
   .replay-row .replay-value {
     flex: 1 1 auto; min-width: 0; padding: 9px 12px;
@@ -1271,6 +1281,33 @@
               <input class="enc-slider" id="replay-mic-gain-slider" type="range" min="-12" max="30" step="1" value="0" />
               <div class="slider-scale"><span>&minus;12 dB</span><span>+30 dB</span></div>
               <div class="enc-tip" id="replay-mic-gain-tip">Lifts the microphone before it is mixed with the game, for when Windows' own level runs out at 100&percnt; and you are still quiet. It lifts the room noise with it, so take the least that works. Applies straight away and keeps the buffer.</div>
+            </div>
+
+            <div class="enc-field" id="replay-noise-field">
+              <div class="set-toggle-row" id="replay-noise-row">
+                <div class="set-toggle-text">
+                  <div class="enc-label" style="margin-bottom:6px"><span>Suppress background noise</span></div>
+                  <div class="enc-tip" style="margin-top:0">Runs your voice through RNNoise, a small neural network that tells speech apart from fans, keyboards and the hum of a room, and turns the rest down. Costs about 0.3&percnt; of one CPU core and holds your voice back by 10 ms, which the recorder puts back so it still lines up with the picture. Switching it applies straight away and keeps the buffer.</div>
+                </div>
+                <div class="set-switch" id="replay-noise-switch"></div>
+              </div>
+            </div>
+
+            <div class="enc-field" id="replay-noise-strength-field">
+              <div class="enc-label"><span>Suppression strength</span><span class="enc-value" id="replay-noise-strength-value">70&percnt;</span></div>
+              <input class="enc-slider" id="replay-noise-strength-slider" type="range" min="5" max="100" step="5" value="70" />
+              <div class="slider-scale"><span>Gentle</span><span>Maximum</span></div>
+              <div class="enc-tip">Up to 40&percnt; it mixes a little of the untouched microphone back in, which keeps your voice at its most natural and leaves the noise that far down. Past 40&percnt; the network runs in full and a gate starts closing whenever it is not sure you are talking &mdash; that is what catches hiss and keyboards, which the network alone lets through. Each step up closes the gate deeper and asks for more certainty before it opens; at the top, very quiet words can get clipped. Applies straight away.</div>
+              <div class="enc-warn" id="replay-noise-warn" style="display:none"></div>
+            </div>
+
+            <div class="enc-field" id="replay-mictest-field">
+              <div class="enc-label"><span>Hear yourself</span></div>
+              <div class="replay-row">
+                <span class="replay-value" id="replay-mictest-value"><span id="replay-mictest-meter"></span><span id="replay-mictest-text">Click Test, say something, click again</span></span>
+                <button id="replay-mictest-btn">Test</button>
+              </div>
+              <div class="enc-tip">Records from the microphone above with the boost and noise suppression exactly as they are set now, then plays it back &mdash; through the same code a saved clip goes through, so this is what a clip of you will sound like. Stops on its own after 30 seconds. Change a setting and test again to compare.</div>
             </div>
 
             <div class="enc-field" style="margin-bottom:0">

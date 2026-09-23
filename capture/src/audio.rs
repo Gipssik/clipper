@@ -958,6 +958,16 @@ pub struct Mixer {
     mic_retry_hns: i64,
     /// The gain in `audio.micGain`, as a multiplier.
     mic_gain: f32,
+    /// Noise suppression on the microphone leg, when asked for and when the mix runs at the rate
+    /// the network needs. `noise_strength` is kept separately so a suppressor rebuilt after the mic
+    /// reopens comes back at the same setting.
+    noise: Option<crate::denoise::Suppressor>,
+    /// Timestamp of the first sample the current suppressor was fed. See `drain_into`.
+    noise_origin: Option<i64>,
+    noise_wanted: bool,
+    noise_strength: f32,
+    /// Why suppression is asked for and not running. Only ever the sample rate, today.
+    pub noise_error: Option<String>,
     /// Loudest microphone frame in the last second, as a fraction of full scale. The settings panel
     /// shows it: "set the boost so this reads about -12 dB" is advice somebody can act on, and
     /// "turn it up until it sounds right" is not.
@@ -1008,6 +1018,9 @@ pub struct MixerConfig<'a> {
     pub mic_device: &'a str,
     /// Decibels of gain on the microphone before the sum.
     pub mic_gain_db: f32,
+    /// Noise suppression on the microphone, and how hard: 0–100, see `denoise::setting`.
+    pub noise_suppression: bool,
+    pub noise_strength: f32,
     /// Makes the keep-alive stream emit a sine instead of silence, which is how the capture path
     /// is tested without needing anything else to be playing.
     pub tone_hz: Option<f32>,
@@ -1022,6 +1035,8 @@ impl Default for MixerConfig<'_> {
             mic: false,
             mic_device: "",
             mic_gain_db: 0.0,
+            noise_suppression: false,
+            noise_strength: 70.0,
             tone_hz: None,
             keep_alive: true,
         }
@@ -1030,7 +1045,16 @@ impl Default for MixerConfig<'_> {
 
 impl Mixer {
     pub fn start(config: MixerConfig) -> Result<Mixer> {
-        let MixerConfig { desktop, mic, mic_device, mic_gain_db, tone_hz, keep_alive } = config;
+        let MixerConfig {
+            desktop,
+            mic,
+            mic_device,
+            mic_gain_db,
+            noise_suppression,
+            noise_strength,
+            tone_hz,
+            keep_alive,
+        } = config;
         let desktop = if desktop {
             Some(Endpoint::loopback(tone_hz, keep_alive)?)
         } else {
@@ -1051,6 +1075,11 @@ impl Mixer {
             mic_request: mic_device.to_string(),
             mic_retry_hns: 0,
             mic_gain: 10f32.powf(mic_gain_db / 20.0),
+            noise: None,
+            noise_origin: None,
+            noise_wanted: false,
+            noise_strength,
+            noise_error: None,
             mic_peak: 0.0,
             mic_peak_frames: 0,
             mic_peak_running: 0.0,
@@ -1075,6 +1104,7 @@ impl Mixer {
             leg_mic: Vec::new(),
             mic_dropouts: 0,
         };
+        mixer.set_noise(noise_suppression, noise_strength);
         if mic {
             mixer.open_mic();
         }
@@ -1127,6 +1157,50 @@ impl Mixer {
     /// sample, so there is nothing to rebuild for it.
     pub fn set_mic_gain(&mut self, db: f32) {
         self.mic_gain = 10f32.powf(db / 20.0);
+    }
+
+    /// Turns suppression on or off, or moves its strength, in place.
+    ///
+    /// Strength is a blend weight and changes nothing else. Switching it on or off does: the
+    /// suppressor delays the voice by a frame and the track's timestamps have to say so, so the
+    /// microphone track starts over at the next packet. That costs one splice of a few
+    /// milliseconds in the voice, and keeps the buffered minute and the game audio untouched.
+    pub fn set_noise(&mut self, on: bool, strength: f32) {
+        self.noise_strength = strength;
+        if on == self.noise_wanted {
+            if let Some(n) = &mut self.noise {
+                n.set_strength(strength);
+            }
+            return;
+        }
+        self.noise_wanted = on;
+        self.noise_error = None;
+        self.noise = None;
+        self.noise_origin = None;
+        if on {
+            if self.rate == crate::denoise::RATE {
+                self.noise = Some(crate::denoise::Suppressor::new(strength));
+            } else {
+                self.noise_error = Some(format!(
+                    "noise suppression needs 48 kHz and the mix runs at {} Hz — set your output device to 48 kHz in Windows' sound settings",
+                    self.rate
+                ));
+            }
+        }
+        self.mike = Track::default();
+    }
+
+    pub fn noise_active(&self) -> bool {
+        self.noise.is_some()
+    }
+
+    /// A fresh network for a fresh stream. The old one's state describes audio that is gone, and
+    /// its origin timestamp would place the new stream's first sample wherever the old one began.
+    fn reset_noise(&mut self) {
+        self.noise_origin = None;
+        if self.noise.is_some() {
+            self.noise = Some(crate::denoise::Suppressor::new(self.noise_strength));
+        }
     }
 
     /// The loudest the microphone has been in the last second, in dBFS after the boost. `None`
@@ -1183,6 +1257,7 @@ impl Mixer {
                 self.mic_name = name;
                 self.mic_error = None;
                 self.mike = Track::default();
+                self.reset_noise();
             }
             Err(e) => {
                 let message = e.message().to_string();
@@ -1220,13 +1295,14 @@ impl Mixer {
         let rate = self.rate as i64;
 
         let mut scratch = std::mem::take(&mut self.scratch_pcm);
-        let desk_stats = drain_into(&mut self.desktop, &mut self.desk, &mut scratch)?;
+        let desk_stats = drain_into(&mut self.desktop, &mut self.desk, &mut scratch, None)?;
         stats.captured_frames += desk_stats.captured_frames;
         stats.filled_frames += desk_stats.filled_frames;
         stats.silent_packets += desk_stats.silent_packets;
         stats.discontinuities += desk_stats.discontinuities;
 
-        match drain_into(&mut self.mic, &mut self.mike, &mut scratch) {
+        let noise = self.noise.as_mut().map(|n| (n, &mut self.noise_origin));
+        match drain_into(&mut self.mic, &mut self.mike, &mut scratch, noise) {
             Ok(mic_stats) => {
                 self.mic_frames += mic_stats.captured_frames;
                 self.mic_stats.captured_frames += mic_stats.captured_frames;
@@ -1241,6 +1317,7 @@ impl Mixer {
                 self.mic = None;
                 self.mic_error = Some(e.message().to_string());
                 self.mike = Track::default();
+                self.reset_noise();
                 self.mic_retry_hns = now + MIC_RETRY_HNS;
             }
         }
@@ -1334,10 +1411,16 @@ impl Mixer {
 }
 
 /// Polls one endpoint, if it is there, into its track.
+///
+/// With a suppressor in the way, what lands in the track is its output, which is aligned sample for
+/// sample with what the endpoint delivered but arrives later. The track is therefore started at
+/// the timestamp of the first sample the *endpoint* produced, remembered in `noise_origin`, and not
+/// at wherever the endpoint had got to by the time the suppressor had a frame ready.
 fn drain_into(
     endpoint: &mut Option<Endpoint>,
     track: &mut Track,
     scratch: &mut Vec<i16>,
+    noise: Option<(&mut crate::denoise::Suppressor, &mut Option<i64>)>,
 ) -> Result<PollStats> {
     let Some(endpoint) = endpoint else {
         return Ok(PollStats::default());
@@ -1352,8 +1435,30 @@ fn drain_into(
     if scratch.is_empty() {
         return Ok(stats);
     }
+    let mut origin = at.or(endpoint.first_hns);
+    if let Some((noise, noise_origin)) = noise {
+        if noise_origin.is_none() {
+            *noise_origin = origin;
+        }
+        let raw = std::mem::take(scratch);
+        noise.process(&raw, scratch);
+        origin = *noise_origin;
+        // The suppressor holds up to four frames before it releases anything. Starting the track
+        // now, empty, is what makes the mix wait for them: a track that has not started is one the
+        // mix does not wait for, so it would run on past `origin` and then throw away all 40 ms
+        // when they arrived.
+        if scratch.is_empty() {
+            if !track.started {
+                if let Some(hns) = origin {
+                    track.start_hns = hns;
+                    track.started = true;
+                }
+            }
+            return Ok(stats);
+        }
+    }
     if !track.started {
-        match at.or(endpoint.first_hns) {
+        match origin {
             Some(hns) => {
                 track.start_hns = hns;
                 track.started = true;

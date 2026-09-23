@@ -2013,6 +2013,17 @@ const replayMicTip      = document.getElementById('replay-mic-tip');
 const replayMicGainField= document.getElementById('replay-mic-gain-field');
 const replayMicGainSl   = document.getElementById('replay-mic-gain-slider');
 const replayMicGainVal  = document.getElementById('replay-mic-gain-value');
+const replayNoiseField  = document.getElementById('replay-noise-field');
+const replayNoiseRow    = document.getElementById('replay-noise-row');
+const replayNoiseSw     = document.getElementById('replay-noise-switch');
+const replayNoiseStrField = document.getElementById('replay-noise-strength-field');
+const replayNoiseStrSl  = document.getElementById('replay-noise-strength-slider');
+const replayNoiseStrVal = document.getElementById('replay-noise-strength-value');
+const replayNoiseWarn   = document.getElementById('replay-noise-warn');
+const replayMicTestField= document.getElementById('replay-mictest-field');
+const replayMicTestBtn  = document.getElementById('replay-mictest-btn');
+const replayMicTestText = document.getElementById('replay-mictest-text');
+const replayMicTestMeter= document.getElementById('replay-mictest-meter');
 const replayNotifySw    = document.getElementById('replay-notify-switch');
 const replayStatus      = document.getElementById('replay-status');
 const replayStatusText  = document.getElementById('replay-status-text');
@@ -2097,6 +2108,14 @@ function applyReplayUi() {
   const gain = Math.round(audio.micGainDb || 0);
   replayMicGainSl.value = gain;
   replayMicGainVal.textContent = (gain > 0 ? '+' : '') + gain + ' dB';
+  const noiseOn = !!audio.noiseSuppression;
+  replayNoiseSw.classList.toggle('on', noiseOn);
+  replayNoiseField.classList.toggle('off', !audio.mic);
+  replayNoiseStrField.classList.toggle('off', !audio.mic || !noiseOn);
+  replayMicTestField.classList.toggle('off', !audio.mic && micTest.state === 'idle');
+  const strength = Math.round(audio.noiseStrength ?? 70);
+  replayNoiseStrSl.value = strength;
+  renderNoiseStrength(strength);
   if (replayMicSel.options.length) {
     // An id we no longer recognise means the device it named is gone. Fall back to the default
     // entry rather than showing a blank picker, but leave the setting alone: plug the headset back
@@ -2252,6 +2271,23 @@ function renderMicTip() {
   replayMicTip.textContent = 'Which one to listen to. Changing it rebuilds the recorder, so the buffer starts over.';
 }
 
+// The percentage alone says nothing about what happens to the sound, so the label says which of
+// the two stages it is in and how far it reaches. Mirrors `denoise::setting`: below 40% the number
+// is the noise floor in dB, above it the gate closes by the distance past 40.
+const NOISE_GATE_FROM = 40;
+function renderNoiseStrength(strength) {
+  replayNoiseStrVal.textContent =
+    strength < NOISE_GATE_FROM ? `${strength}% · noise down to −${strength} dB`
+    : strength === NOISE_GATE_FROM ? `${strength}% · the network on its own`
+    : `${strength}% · pauses gated to −${strength - NOISE_GATE_FROM} dB`;
+}
+
+function renderNoiseWarning(error) {
+  const on = !!(replayConfig && replayConfig.audio && replayConfig.audio.mic && replayConfig.audio.noiseSuppression);
+  replayNoiseWarn.style.display = on && error ? '' : 'none';
+  replayNoiseWarn.textContent = error ? `Not suppressing: ${error}.` : '';
+}
+
 function buildReplayMics(devices) {
   replayMicSel.innerHTML = '';
   // "Use default device" is not the same choice as naming whichever device is default today: it
@@ -2330,6 +2366,69 @@ replayMicGainSl.addEventListener('input', () => {
   replayMicGainVal.textContent = (db > 0 ? '+' : '') + db + ' dB';
   patchReplay({ audio: { ...replayConfig.audio, micGainDb: db } });
 });
+replayNoiseRow.addEventListener('click', () =>
+  patchReplay({ audio: { ...replayConfig.audio, noiseSuppression: !replayConfig.audio.noiseSuppression } }));
+// Written on release rather than on every step. The daemon takes it in place either way, but a
+// strength is judged by listening to a test, not by dragging and hearing it change.
+replayNoiseStrSl.addEventListener('input', () => renderNoiseStrength(parseInt(replayNoiseStrSl.value, 10)));
+replayNoiseStrSl.addEventListener('change', () =>
+  patchReplay({ audio: { ...replayConfig.audio, noiseStrength: parseInt(replayNoiseStrSl.value, 10) } }));
+
+// Hear yourself: idle → recording → playing → idle. The recording is made by the recorder's own
+// mixer in a process of its own (see `mictest` in the capture crate), so what plays back is what a
+// clip would contain, and the test works whether or not the buffer is running.
+const micTest = { state: 'idle', audio: null };
+
+function setMicTest(state, text) {
+  micTest.state = state;
+  replayMicTestBtn.textContent = state === 'recording' ? 'Stop & play' : state === 'playing' ? 'Stop' : 'Test';
+  replayMicTestBtn.classList.toggle('listening', state !== 'idle');
+  if (text) replayMicTestText.textContent = text;
+  if (state !== 'recording') replayMicTestMeter.style.width = '0';
+  if (replayConfig) applyReplayUi();
+}
+
+function stopMicPlayback() {
+  if (micTest.audio) { micTest.audio.pause(); micTest.audio = null; }
+}
+
+replayMicTestBtn.addEventListener('click', async () => {
+  if (micTest.state === 'idle') {
+    stopMicPlayback();
+    setMicTest('recording', 'Listening — say something');
+    if (!(await api.micTestStart())) setMicTest('idle', 'Could not start the test — is the recorder installed?');
+  } else if (micTest.state === 'recording') {
+    replayMicTestText.textContent = 'Finishing…';
+    api.micTestStop();
+  } else {
+    stopMicPlayback();
+    setMicTest('idle', 'Click Test, say something, click again');
+  }
+});
+
+function onMicTestEvent(event) {
+  if (event.event === 'mictest-level' && micTest.state === 'recording') {
+    // -60 dB to 0 dB across the box: below -60 is room tone, and the bar should sit still for it.
+    const pct = Math.max(0, Math.min(100, (event.peakDb + 60) / 60 * 100));
+    replayMicTestMeter.style.width = pct + '%';
+    const peak = event.peakDb > -100 ? `${Math.round(event.peakDb)} dB`.replace('-', '−') : 'silent';
+    replayMicTestText.textContent = `Listening — ${event.seconds.toFixed(1)} s · ${peak}`;
+  } else if (event.event === 'mictest-finished') {
+    if (event.message) {
+      setMicTest('idle', 'Test failed: ' + event.message);
+      return;
+    }
+    const peak = event.peakDb > -100 ? `peaked at ${Math.round(event.peakDb)} dB`.replace('-', '−') : 'silent — is the right microphone selected?';
+    const suppressed = event.noiseActive ? ', noise suppressed' : '';
+    const audio = new Audio('file:///' + encodeURI(event.path.replace(/\\/g, '/')) + '?t=' + Date.now());
+    micTest.audio = audio;
+    audio.onended = () => { if (micTest.audio === audio) { micTest.audio = null; setMicTest('idle', `Played ${event.seconds.toFixed(1)} s — ${peak}${suppressed}`); } };
+    audio.onerror = () => { if (micTest.audio === audio) { micTest.audio = null; setMicTest('idle', 'Could not play the recording back'); } };
+    setMicTest('playing', `Playing ${event.seconds.toFixed(1)} s — ${peak}${suppressed}`);
+    audio.play().catch(() => {});
+  }
+}
+
 replayNotifySw.addEventListener('click', () => patchReplay({ notifyOnSave: replayConfig.notifyOnSave === false }));
 
 replayBufferSlider.addEventListener('input', () => {
@@ -2444,6 +2543,7 @@ api.onCaptureEvent((event) => {
         peakDb: typeof event.micPeakDb === 'number' ? event.micPeakDb : null,
       };
       renderMicTip();
+      renderNoiseWarning(event.noiseError || null);
       renderForeground();
       if (event.enabled && !event.displayPresent) {
         setReplayStatus(`Waiting for ${event.monitor} to come back`, false, true);
@@ -2466,6 +2566,10 @@ api.onCaptureEvent((event) => {
     case 'foreground':
       replayFront = { process: event.process || '', category: event.category || '', isGame: !!event.isGame, recording: !!event.worthRecording, reason: event.reason || '' };
       renderForeground();
+      break;
+    case 'mictest-level':
+    case 'mictest-finished':
+      onMicTestEvent(event);
       break;
     case 'displays-changed':
       refreshReplayMonitors();

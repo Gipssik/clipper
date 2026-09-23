@@ -374,7 +374,7 @@ const CAPTURE_DEFAULTS = {
   outputPath: '',
   perGameSubfolder: true,
   hotkey: 'Ctrl+Alt+F12',
-  audio: { desktop: true, mic: true, micDevice: '', micGainDb: 0 },
+  audio: { desktop: true, mic: true, micDevice: '', micGainDb: 0, noiseSuppression: false, noiseStrength: 70 },
   toneMap: 'auto',
   segmentDir: null,
   includeProcesses: [],
@@ -701,6 +701,61 @@ function askCapture(command) {
 }
 
 ipcMain.handle('capture:monitors', () => askCapture('monitors'));
+
+// The microphone test: record through the recorder's own mixer — boost, suppression, limiter —
+// into a WAV the panel plays back. A separate process from the daemon so a test never disturbs
+// the buffer; the two share the microphone, which shared-mode WASAPI allows.
+//
+// Stopped by a line on its stdin. Closing stdin stops it too, so a window that goes away mid-test
+// cannot leave it listening.
+const micTest = { proc: null, done: null };
+
+ipcMain.handle('capture:micTestStart', () => {
+  if (micTest.proc) return false;
+  const exe = getCapturePath();
+  if (!fs.existsSync(exe)) return false;
+  const { audio } = loadCaptureConfig();
+  const args = ['mictest', '--seconds', '30', '--out', path.join(app.getPath('temp'), 'clipper-mictest.wav')];
+  if (audio.micDevice) args.push('--mic-device', audio.micDevice);
+  args.push('--mic-gain', String(audio.micGainDb || 0));
+  if (audio.noiseSuppression) args.push('--noise', String(audio.noiseStrength ?? 70));
+
+  const proc = spawn(exe, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] });
+  micTest.proc = proc;
+  let result = null;
+  let buffer = '';
+  proc.stdout.on('data', (chunk) => {
+    buffer += chunk.toString();
+    let nl;
+    while ((nl = buffer.indexOf('\n')) >= 0) {
+      const line = buffer.slice(0, nl).trim();
+      buffer = buffer.slice(nl + 1);
+      // The log goes to stdout as well as to the file; anything that is not JSON is that.
+      let event;
+      try { event = JSON.parse(line); } catch { continue; }
+      if (event.event === 'done' || event.event === 'error') result = event;
+      sendCaptureEvent({ ...event, event: 'mictest-' + event.event });
+    }
+  });
+  micTest.done = new Promise((resolve) => {
+    const finish = () => {
+      if (micTest.proc === proc) micTest.proc = null;
+      resolve(result || { event: 'error', message: 'the microphone test stopped without saying why' });
+    };
+    proc.on('close', finish);
+    proc.on('error', finish);
+  });
+  // Also reaches the panel when the 30 s cap ends the test rather than the button.
+  micTest.done.then((r) => sendCaptureEvent({ ...r, event: 'mictest-finished' }));
+  return true;
+});
+
+ipcMain.handle('capture:micTestStop', () => {
+  const { proc, done } = micTest;
+  if (!proc) return done;
+  try { proc.stdin.write('stop\n'); } catch {}
+  return done;
+});
 
 // Microphones, asked for fresh every time the panel opens rather than cached: a headset that was
 // plugged in a minute ago is exactly the device somebody is coming here to pick.

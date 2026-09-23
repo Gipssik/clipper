@@ -213,13 +213,12 @@
   .vid-card:hover .play-circle { transform: scale(1); }
 
   .vid-card-body { padding: 10px 12px 11px; }
-  .vid-card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; margin-bottom: 6px; }
-  .vid-name { font-size: calc(12px * var(--font-scale)); font-weight: 700; color: var(--text); line-height: 1.3; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* The menu sits at the end of the meta row now that there is no name row above it. */
   .vid-menu-btn {
     flex-shrink: 0; width: 22px; height: 22px; border: none; background: transparent;
     color: var(--text3); cursor: pointer; border-radius: 4px; display: flex;
     align-items: center; justify-content: center; font-size: calc(15px * var(--font-scale)); font-weight: 700;
-    transition: background 0.12s, color 0.12s; margin-top: -2px;
+    transition: background 0.12s, color 0.12s; margin-left: auto; margin-right: -4px;
   }
   .vid-menu-btn:hover { background: var(--surface3); color: var(--text); }
 
@@ -291,9 +290,9 @@
     display: flex; align-items: center; gap: 10px;
     padding: 14px 18px; border-bottom: 1px solid var(--border); flex-shrink: 0;
   }
-  #modal-filename { font-size: calc(13px * var(--font-scale)); font-weight: 700; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #modal-category { padding: 2px 8px; background: var(--surface3); border: 1px solid var(--border2); border-radius: 4px; font-size: calc(10px * var(--font-scale)); font-weight: 700; color: var(--text2); letter-spacing: 0.05em; text-transform: uppercase; flex-shrink: 0; }
-  #modal-duration { font-family: 'DM Mono', monospace; font-size: calc(11px * var(--font-scale)); color: var(--text2); flex-shrink: 0; }
+  /* Pushes the buttons to the right edge, the job the filename used to do by filling the row. */
+  #modal-duration { font-family: 'DM Mono', monospace; font-size: calc(11px * var(--font-scale)); color: var(--text2); flex-shrink: 0; margin-right: auto; }
   #modal-explorer-btn {
     padding: 5px 11px; background: transparent; border: 1px solid var(--border2);
     color: var(--text2); border-radius: 5px; font-family: 'Syne', sans-serif;
@@ -537,10 +536,13 @@
   /* Field rows */
   .enc-field { margin-bottom: 22px; }
   .enc-field:last-child { margin-bottom: 0; }
+  /* The title of a setting is in the main text colour, a step above the tip beneath it. Both used
+     to be --text2, and in a panel where every control carries a paragraph the titles disappeared
+     into their own explanations. */
   .enc-label {
     display: flex; align-items: baseline; justify-content: space-between; gap: 10px;
-    font-size: calc(10.5px * var(--font-scale)); font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
-    color: var(--text2); margin-bottom: 9px;
+    font-size: calc(11px * var(--font-scale)); font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--text); margin-bottom: 9px;
   }
   .enc-label .enc-value { font-size: calc(12.5px * var(--font-scale)); color: var(--accent); letter-spacing: 0; text-transform: none; font-weight: 700; }
   .enc-tip { font-size: calc(12px * var(--font-scale)); line-height: 1.6; color: var(--text2); margin-top: 8px; }
@@ -892,7 +894,6 @@
   </button>
   <div id="trim-modal">
     <div id="modal-header">
-      <span id="modal-filename">clip.mp4</span>
       <span id="modal-category">Category</span>
       <span id="modal-duration">0:00</span>
       <button id="modal-explorer-btn">

@@ -52,7 +52,6 @@ const catDropdownList= document.getElementById('cat-dropdown-list');
 const videoGrid         = document.getElementById('video-grid');
 const gridEmpty         = document.getElementById('grid-empty');
 const modalOverlay      = document.getElementById('modal-overlay');
-const modalFilename     = document.getElementById('modal-filename');
 const modalCategory     = document.getElementById('modal-category');
 const modalDuration     = document.getElementById('modal-duration');
 const modalExplorerBtn  = document.getElementById('modal-explorer-btn');
@@ -498,18 +497,17 @@ function makeCard(v) {
       </div>
     </div>
     <div class="vid-card-body">
-      <div class="vid-card-top">
-        <div class="vid-name">${v.name}</div>
-        <button class="vid-menu-btn" title="Options">⋮</button>
-      </div>
       <div class="vid-card-meta">
         <span class="vid-category">${v.category}</span>
         <div class="vid-meta-text">
           <span>${fmtBytes(v.size)}</span>
           <span>${fmtDate(v.mtime)}</span>
         </div>
+        <button class="vid-menu-btn" title="Options">⋮</button>
       </div>
     </div>`;
+  // The filename is not shown on the card, so it is one hover away rather than nowhere.
+  card.title = v.name;
 
   card.appendChild(dropdown);
 
@@ -557,8 +555,8 @@ function makeCard(v) {
 // ── Modal ─────────────────────────────────────────────────────────────────────
 function openModal(clip) {
   currentClip = clip;
-  modalFilename.textContent = clip.name;
   modalCategory.textContent = clip.category;
+  modalExplorerBtn.title = clip.name;
   previewVideo.src = 'file:///' + clip.fullPath.replace(/\\/g, '/');
   previewVideo.load();
   previewVideo.addEventListener('loadedmetadata', onVideoLoaded, { once: true });

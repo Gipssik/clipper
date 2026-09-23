@@ -533,7 +533,7 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
                     .as_ref()
                     .map(|p| {
                         format!(
-                            " after {} frames at {:.1} fps, {} dropped, {} missed, {} capture frames in, {} empty polls, {} pool rebuilds, {} segments",
+                            " after {} frames at {:.1} fps, {} dropped, {} missed, {} capture frames in, {} empty polls, {} pool rebuilds, {} segments, encoder asked {} / fed {}",
                             p.video_packets,
                             p.measured_fps(),
                             p.encoder.dropped,
@@ -541,7 +541,9 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
                             p.capture.frames_in,
                             p.capture.empty_polls,
                             p.capture.recreates,
-                            p.ring.segments_written
+                            p.ring.segments_written,
+                            p.encoder.need_input_events,
+                            p.encoder.inputs
                         )
                     })
                     .unwrap_or_default();

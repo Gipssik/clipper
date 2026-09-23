@@ -85,6 +85,11 @@ pub struct Encoder {
     pub dropped: u64,
     pub need_input_events: u64,
     pub have_output_events: u64,
+    /// Requests for input that arrived while we were only collecting output. Each one is the
+    /// transform's permission to send exactly one frame, and it does not ask twice: a request
+    /// thrown away is a slot in its queue lost for the life of the encoder. Lose them all and it
+    /// never asks again — the recorder goes silent and the watchdog rebuilds it.
+    credits: u32,
     pub inputs: u64,
     pub null_outputs: u64,
     /// What the codec actually accepted, for the log. Drivers differ in which knobs they honour
@@ -257,6 +262,7 @@ impl Encoder {
             dropped: 0,
             need_input_events: 0,
             have_output_events: 0,
+            credits: 0,
             inputs: 0,
             null_outputs: 0,
             applied,
@@ -330,6 +336,10 @@ impl Encoder {
     /// reporting itself as running. A bounded poll turns that into a dropped frame and a counter
     /// somebody can see. The budget is several frame intervals, so it costs nothing when healthy.
     fn pump_until_need_input(&mut self) -> Result<bool> {
+        if self.credits > 0 {
+            self.credits -= 1;
+            return Ok(true);
+        }
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
         let events = self.events.clone().unwrap();
         loop {
@@ -368,6 +378,10 @@ impl Encoder {
                 x if x == METransformHaveOutput.0 => {
                     self.have_output_events += 1;
                     self.collect_output()?
+                }
+                x if x == METransformNeedInput.0 => {
+                    self.need_input_events += 1;
+                    self.credits += 1;
                 }
                 x if x == METransformDrainComplete.0 => return Ok(()),
                 _ => {}

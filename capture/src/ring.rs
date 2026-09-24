@@ -224,6 +224,19 @@ impl Ring {
         }
     }
 
+    /// Deletes every segment a save is not reading. For replay being switched off while the
+    /// pipeline stays up for a recording: the footage is no longer wanted, and nothing else would
+    /// clear it until the next ring swept the directory.
+    pub fn discard(&mut self) {
+        self.close_current();
+        let pinned = self.pinned.lock().unwrap();
+        for segment in self.segments.drain(..) {
+            if !pinned.contains(&segment.path) {
+                let _ = std::fs::remove_file(&segment.path);
+            }
+        }
+    }
+
     /// Flushes anything still buffered and closes the open segment.
     pub fn finish(&mut self) -> std::io::Result<()> {
         let last = self.pending_audio.back().map(|(_, pts)| *pts).unwrap_or(0);
@@ -338,36 +351,9 @@ fn concat_and_remux(
         file.flush().map_err(|e| e.to_string())?;
     }
 
-    if let Some(parent) = out.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
-    // -c copy: the bitstream is already what we want, and re-encoding a clip on the way out would
-    // cost generation loss for nothing. aac_adtstoasc converts the ADTS framing TS carries into
-    // the ASC form MP4 expects; without it the audio track is rejected.
-    let output = std::process::Command::new(ffmpeg)
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-fflags",
-            "+genpts",
-            "-i",
-        ])
-        .arg(&joined)
-        .args(["-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", "-y"])
-        .arg(out)
-        .output()
-        .map_err(|e| format!("spawn ffmpeg: {e}"))?;
-
+    let result = remux(&joined, out, ffmpeg);
     let _ = std::fs::remove_file(&joined);
-
-    if !output.status.success() {
-        return Err(format!(
-            "ffmpeg failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
+    result?;
 
     let first = chosen.first().unwrap();
     let last = chosen.last().unwrap();
@@ -379,4 +365,53 @@ fn concat_and_remux(
         actual_ms: (last.2.saturating_sub(first.1)) * 1000 / HZ,
         elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
     })
+}
+
+/// A TS stream into an MP4, bitstream untouched. Shared by a saved replay and a finished recording.
+///
+/// -c copy: the bitstream is already what we want, and re-encoding on the way out would cost
+/// generation loss for nothing. aac_adtstoasc converts the ADTS framing TS carries into the ASC
+/// form MP4 expects; without it the audio track is rejected. `-f mp4` because a recording is
+/// written to a `.part` name first, and ffmpeg would otherwise guess the container from that.
+pub fn remux(input: &Path, out: &Path, ffmpeg: &Path) -> Result<(), String> {
+    if let Some(parent) = out.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let output = std::process::Command::new(ffmpeg)
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-fflags",
+            "+genpts",
+            "-i",
+        ])
+        .arg(input)
+        .args(["-c", "copy", "-bsf:a", "aac_adtstoasc", "-movflags", "+faststart", "-f", "mp4", "-y"])
+        .arg(out)
+        .output()
+        .map_err(|e| format!("spawn ffmpeg: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ffmpeg failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// The container's own idea of how long a file is, from the banner ffmpeg prints for any input.
+pub fn probe_duration_ms(path: &Path, ffmpeg: &Path) -> Option<u64> {
+    let output = std::process::Command::new(ffmpeg)
+        .args(["-hide_banner", "-i"])
+        .arg(path)
+        .output()
+        .ok()?;
+    let banner = String::from_utf8_lossy(&output.stderr);
+    let at = banner.find("Duration: ")? + "Duration: ".len();
+    let mut parts = banner[at..].split(',').next()?.trim().split(':');
+    let h: f64 = parts.next()?.parse().ok()?;
+    let m: f64 = parts.next()?.parse().ok()?;
+    let s: f64 = parts.next()?.parse().ok()?;
+    Some(((h * 3600.0 + m * 60.0 + s) * 1000.0).round() as u64)
 }

@@ -26,6 +26,7 @@ mod denoise;
 mod display;
 mod encoder;
 mod hotkey;
+mod record;
 mod ring;
 mod ts;
 mod monitors;
@@ -124,6 +125,10 @@ fn usage() {
     eprintln!("    --out <dir>            where clips land");
     eprintln!("    --seconds <n>          stop after n seconds (default: run until Ctrl+C)");
     eprintln!("    --save-after <n>       fire a save n seconds in, for testing without a keyboard");
+    eprintln!("    --record-after <n>     start a recording n seconds in");
+    eprintln!("    --record-for <n>       and stop it n seconds later (default: at exit)");
+    eprintln!("    --record-hotkey <c>    default Alt+F9");
+    eprintln!("    --no-replay            no ring buffer; the pipeline runs only while recording");
     eprintln!("    --quality <tier>       low | medium | high | ultra | native (default high)");
     eprintln!("    --bitrate <bps>        override the tier's mean bitrate");
     eprintln!("    --max-bitrate <bps>    override the tier's peak bitrate");
@@ -785,11 +790,12 @@ fn ffmpeg_path(args: &[String]) -> std::path::PathBuf {
     PathBuf::from("ffmpeg")
 }
 
-pub fn timestamp_name() -> String {
+/// `clip_2026-09-21_18-42-03.mp4` for a saved replay, `rec_…` for a recording.
+pub fn timestamp_name(prefix: &str) -> String {
     use windows::Win32::System::SystemInformation::GetLocalTime;
     let t = unsafe { GetLocalTime() };
     format!(
-        "clip_{:04}-{:02}-{:02}_{:02}-{:02}-{:02}.mp4",
+        "{prefix}_{:04}-{:02}-{:02}_{:02}-{:02}-{:02}.mp4",
         t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
     )
 }
@@ -800,6 +806,10 @@ fn config_from_args(args: &[String]) -> config::Config {
         .clamp(config::MIN_BUFFER_SECONDS, config::MAX_BUFFER_SECONDS);
     config.quality = flag(args, "--quality").unwrap_or("high").to_string();
     config.hotkey = flag(args, "--hotkey").unwrap_or("Ctrl+Alt+F12").to_string();
+    config.record.enabled = true;
+    config.record.hotkey = flag(args, "--record-hotkey").unwrap_or("Alt+F9").to_string();
+    // Replay off leaves only the recording, which is how record-only is tested from here.
+    config.enabled = !present(args, "--no-replay");
     // `--no-audio` means no audio, not "no desktop audio": the config default now turns the
     // microphone on, and a flag that left one of the two sources running would be a trap.
     config.audio.desktop = !present(args, "--no-audio");
@@ -835,6 +845,8 @@ fn cmd_record(args: &[String]) -> Fallible<()> {
         daemon::Options {
             run_seconds: number(args, "--seconds", 0.0),
             save_after: number(args, "--save-after", 0.0),
+            record_after: number(args, "--record-after", 0.0),
+            record_for: number(args, "--record-for", 0.0),
             stall_after: number(args, "--stall-after", 0.0),
             ffmpeg: ffmpeg_path(args),
             config_path: None,
@@ -878,6 +890,8 @@ fn cmd_daemon(args: &[String]) -> Fallible<()> {
         daemon::Options {
             run_seconds: number(args, "--seconds", 0.0),
             save_after: 0.0,
+            record_after: 0.0,
+            record_for: 0.0,
             stall_after: 0.0,
             ffmpeg: ffmpeg_path(args),
             config_path: Some(config_path),

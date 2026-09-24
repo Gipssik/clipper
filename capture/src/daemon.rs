@@ -24,6 +24,7 @@ use windows::Graphics::DirectX::DirectXPixelFormat;
 
 use crate::config::Config;
 use crate::ipc::{Command, Control};
+use crate::record::{self, Recording};
 use crate::{aac, audio, capture, clock, config, convert, d3d, display, encoder, foreground, hotkey, monitors, ring};
 
 /// The timeline starts a second in rather than at zero: a PCR of 0 upsets some players.
@@ -65,12 +66,16 @@ pub struct Options {
     pub run_seconds: f64,
     /// Fire a save this far in, so the path can be exercised without a keyboard.
     pub save_after: f64,
-    /// Stop feeding the pipeline this far in, for ten seconds, without telling it.
+    /// Stop feeding the pipeline this far in, for up to ten seconds, without telling it. Only that
+    /// pipeline: the one the watchdog replaces it with runs normally.
     ///
     /// This exists for the same reason `--no-keepalive` does: the watchdog's whole claim is that a
     /// pipeline which quietly stops producing gets noticed and rebuilt, and a claim that cannot be
     /// made to happen on demand is not a claim, it is a hope. Zero means never.
     pub stall_after: f64,
+    /// Start a recording this far in, and stop it `record_for` seconds later (zero: at exit).
+    pub record_after: f64,
+    pub record_for: f64,
     pub ffmpeg: PathBuf,
     pub config_path: Option<PathBuf>,
     pub ipc: bool,
@@ -83,13 +88,16 @@ struct Pipeline {
     encoder: encoder::Encoder,
     audio: Option<audio::Mixer>,
     aac: Option<aac::AacEncoder>,
-    ring: ring::Ring,
+    /// The replay buffer. Absent when instant replay is off and the pipeline exists only because a
+    /// recording is running.
+    ring: Option<ring::Ring>,
     ticker: clock::Ticker,
     epoch_hns: i64,
     audio_base: Option<i64>,
     freq: i64,
     width: u32,
     height: u32,
+    fps: u32,
     /// What the display was doing when this pipeline was built. The pixel format, the white-level
     /// divide and the tone curve are all derived from it, so a change here is a rebuild.
     panel: display::DisplayHdr,
@@ -112,7 +120,7 @@ struct Pipeline {
 }
 
 impl Pipeline {
-    fn start(config: &Config, monitor: &monitors::Monitor) -> crate::Fallible<Self> {
+    fn start(config: &Config, monitor: &monitors::Monitor, replay: bool) -> crate::Fallible<Self> {
         let panel = display::probe(monitor.handle, &monitor.device);
         let tone_map = match config.tone_map.as_str() {
             "always" => true,
@@ -188,12 +196,11 @@ impl Pipeline {
             None => None,
         };
 
-        let ring = ring::Ring::new(
-            &config.segment_dir(),
-            config::GOP_SECONDS as f64,
-            config.buffer_seconds,
-            audio.is_some(),
-        )?;
+        let ring = if replay {
+            Some(new_ring(config, audio.is_some())?)
+        } else {
+            None
+        };
 
         let freq = clock::qpc_frequency();
         let encoder_name = encoder.name.clone();
@@ -212,6 +219,7 @@ impl Pipeline {
             freq,
             width,
             height,
+            fps: tier.fps,
             panel,
             src: (src.Width, src.Height),
             tone_map,
@@ -226,6 +234,31 @@ impl Pipeline {
             last_progress: clock::qpc_now(),
             last_progress_packets: 0,
         })
+    }
+
+    /// What a recording fed by this pipeline is made of. A recording can carry on across a rebuild
+    /// only into a pipeline that agrees.
+    fn format(&self) -> record::Format {
+        record::Format {
+            width: self.width,
+            height: self.height,
+            fps: self.fps,
+            audio: self.audio.is_some(),
+        }
+    }
+
+    /// Starts or stops the replay buffer without touching the rest of the pipeline, for replay
+    /// being switched while a recording keeps the pipeline up.
+    fn set_replay(&mut self, on: bool, config: &Config) -> crate::Fallible<()> {
+        if on && self.ring.is_none() {
+            self.ring = Some(new_ring(config, self.audio.is_some())?);
+        } else if !on {
+            if let Some(mut ring) = self.ring.take() {
+                let _ = ring.finish();
+                ring.discard();
+            }
+        }
+        Ok(())
     }
 
     /// Frames actually encoded per second since this pipeline started. The tick rate is supposed
@@ -261,7 +294,9 @@ impl Pipeline {
         ((hns + PTS_OFFSET_HNS).max(0) as u64) * 9 / 1000
     }
 
-    fn tick(&mut self) -> crate::Fallible<()> {
+    /// One frame. Every packet goes to the replay ring and, while one is running, the recording —
+    /// the same bytes to both, which is why a recording costs no encoding at all.
+    fn tick(&mut self, mut rec: Option<&mut Recording>) -> crate::Fallible<()> {
         let scheduled = self.ticker.wait();
 
         self.capture.pump(&self.gpu)?;
@@ -283,7 +318,12 @@ impl Pipeline {
                 for packet in enc.submit(&pcm, self.audio_base.unwrap_or(0))? {
                     self.audio_packets += 1;
                     let pts = ((packet.pts_hns + PTS_OFFSET_HNS).max(0) as u64) * 9 / 1000;
-                    self.ring.push_audio(packet.data, pts);
+                    if let Some(r) = rec.as_deref_mut() {
+                        r.push_audio(&packet.data, pts);
+                    }
+                    if let Some(ring) = &mut self.ring {
+                        ring.push_audio(packet.data, pts);
+                    }
                 }
             }
         }
@@ -291,7 +331,12 @@ impl Pipeline {
         for packet in self.encoder.take() {
             self.video_packets += 1;
             let pts = self.to_90k(packet.pts_hns);
-            self.ring.push_video(&packet.data, pts, packet.keyframe)?;
+            if let Some(r) = rec.as_deref_mut() {
+                r.push_video(&packet.data, pts, packet.keyframe);
+            }
+            if let Some(ring) = &mut self.ring {
+                ring.push_video(&packet.data, pts, packet.keyframe)?;
+            }
         }
         Ok(())
     }
@@ -342,11 +387,16 @@ impl Pipeline {
         None
     }
 
-    fn finish(&mut self) {
+    fn finish(&mut self, mut rec: Option<&mut Recording>) {
         if let Ok(packets) = self.encoder.finish() {
             for packet in packets {
                 let pts = self.to_90k(packet.pts_hns);
-                let _ = self.ring.push_video(&packet.data, pts, packet.keyframe);
+                if let Some(r) = rec.as_deref_mut() {
+                    r.push_video(&packet.data, pts, packet.keyframe);
+                }
+                if let Some(ring) = &mut self.ring {
+                    let _ = ring.push_video(&packet.data, pts, packet.keyframe);
+                }
             }
         }
         if let (Some(mixer), Some(enc)) = (&mut self.audio, &mut self.aac) {
@@ -357,8 +407,13 @@ impl Pipeline {
             if !tail.is_empty() {
                 if let Ok(packets) = enc.submit(&tail, self.audio_base.unwrap_or(0)) {
                     for packet in packets {
-                        let pts = self.to_90k(packet.pts_hns);
-                        self.ring.push_audio(packet.data, pts);
+                        let pts = ((packet.pts_hns + PTS_OFFSET_HNS).max(0) as u64) * 9 / 1000;
+                        if let Some(r) = rec.as_deref_mut() {
+                            r.push_audio(&packet.data, pts);
+                        }
+                        if let Some(ring) = &mut self.ring {
+                            ring.push_audio(packet.data, pts);
+                        }
                     }
                 }
             }
@@ -366,12 +421,19 @@ impl Pipeline {
         if let Some(enc) = &mut self.aac {
             if let Ok(packets) = enc.finish() {
                 for packet in packets {
-                    let pts = self.to_90k(packet.pts_hns);
-                    self.ring.push_audio(packet.data, pts);
+                    let pts = ((packet.pts_hns + PTS_OFFSET_HNS).max(0) as u64) * 9 / 1000;
+                    if let Some(r) = rec.as_deref_mut() {
+                        r.push_audio(&packet.data, pts);
+                    }
+                    if let Some(ring) = &mut self.ring {
+                        ring.push_audio(packet.data, pts);
+                    }
                 }
             }
         }
-        let _ = self.ring.finish();
+        if let Some(ring) = &mut self.ring {
+            let _ = ring.finish();
+        }
     }
 }
 
@@ -404,11 +466,21 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
         crate::lifecycle::log(&format!("{selector} is not connected; waiting for it"));
     }
 
-    let mut key = hotkey::Hotkey::register(&config.hotkey);
-    if let Err(e) = &key {
-        crate::lifecycle::log(&format!("hotkey unavailable: {}", e.message()));
-        emit(serde_json::json!({ "event": "error", "message": format!("hotkey: {}", e.message()) }));
-    }
+    // Each hotkey exists only while its feature is on: a combination held for a switched-off
+    // feature would be taken away from every other program for nothing.
+    let register = |wanted: bool, spec: &str, id: i32| {
+        if !wanted {
+            return None;
+        }
+        let key = hotkey::Hotkey::register(spec, id);
+        if let Err(e) = &key {
+            crate::lifecycle::log(&format!("hotkey {spec} unavailable: {}", e.message()));
+            emit(serde_json::json!({ "event": "error", "message": format!("hotkey: {}", e.message()) }));
+        }
+        Some(key)
+    };
+    let mut save_key = register(config.enabled, &config.hotkey, hotkey::SAVE);
+    let mut record_key = register(config.record.enabled, &config.record.hotkey, hotkey::RECORD);
 
     let mut watcher = foreground::Watcher::new();
     crate::lifecycle::log(&format!(
@@ -435,6 +507,26 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
     let mut last_heartbeat = 0.0f64;
     let mut panel = display::probe(monitor.handle, &monitor.device);
     let mut last_error = String::new();
+    // What the replay was last reported as doing, so `state` goes out on a change rather than from
+    // every place that can cause one.
+    let mut buffering = false;
+    // Which pipeline `--stall-after` wedges, identified by when it started.
+    let mut stall_victim: Option<i64> = None;
+
+    // A recording is *wanted* from the moment it is asked for, and *exists* once there is a
+    // pipeline to feed it — which is a second or so later when nothing was running, and never
+    // while the chosen display is missing. The gap between the two is what `waiting` reports.
+    let mut record_wanted = false;
+    let mut record_since: Option<std::time::Instant> = None;
+    let mut record_fired = false;
+    let mut record_started_at = 0.0f64;
+    let mut recording: Option<Recording> = None;
+    // Set between one file of a recording ending on a format change and the next one starting.
+    let mut rolling_over = false;
+    let mut finishing: Vec<std::sync::mpsc::Receiver<Result<record::Outcome, String>>> = Vec::new();
+    if let Some(rx) = record::recover(&config.recordings_dir(), options.ffmpeg.clone()) {
+        finishing.push(rx);
+    }
 
     while !quit {
         let elapsed = clock::qpc_to_ms(clock::qpc_now() - started, freq) / 1000.0;
@@ -449,20 +541,26 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
             last_heartbeat = elapsed;
             if let Some(p) = &pipeline {
                 crate::lifecycle::log(&format!(
-                    "heartbeat: {:.0}s recorded {} frames at {:.1} fps, {} dropped, {} missed ticks, {} segments, audio {:+.0} ms",
+                    "heartbeat: {:.0}s recorded {} frames at {:.1} fps, {} dropped, {} missed ticks, {} segments, audio {:+.0} ms{}",
                     elapsed,
                     p.video_packets,
                     p.measured_fps(),
                     p.encoder.dropped,
                     p.ticker.missed,
-                    p.ring.segments_written,
-                    p.audio_offset_ms().unwrap_or(0.0)
+                    p.ring.as_ref().map_or(0, |r| r.segments_written),
+                    p.audio_offset_ms().unwrap_or(0.0),
+                    recording
+                        .as_ref()
+                        .map(|r| format!(", recording {} s, {} MB", r.duration_ms() / 1000, r.bytes / 1_000_000))
+                        .unwrap_or_default()
                 ));
             }
         }
 
         // ── what should be running ────────────────────────────────────────────────
-        if elapsed * 1000.0 - last_foreground_check >= FOREGROUND_POLL_MS {
+        // Only the replay asks what is in front. A recording records the screen, whatever is on
+        // it, so with replay off there is nothing to classify and no GPU counter worth reading.
+        if config.enabled && elapsed * 1000.0 - last_foreground_check >= FOREGROUND_POLL_MS {
             last_foreground_check = elapsed * 1000.0;
             let now = watcher.poll(
                 monitor.handle,
@@ -499,10 +597,7 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
                         emit(serde_json::json!({ "event": "display", "present": true, "monitor": found.friendly }));
                     }
                     if found.handle != monitor.handle && pipeline.is_some() {
-                        if let Some(mut p) = pipeline.take() {
-                            p.finish();
-                            collect(&mut totals, &p);
-                        }
+                        retire(pipeline.take(), &mut totals, &mut recording);
                         crate::lifecycle::log("the display came back on a new handle; rebuilding");
                     }
                     monitor = found;
@@ -515,11 +610,7 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
                         emit(serde_json::json!({ "event": "display", "present": false, "monitor": selector }));
                     }
                     display_present = false;
-                    if let Some(mut p) = pipeline.take() {
-                        p.finish();
-                        collect(&mut totals, &p);
-                        emit(serde_json::json!({ "event": "state", "recording": false }));
-                    }
+                    retire(pipeline.take(), &mut totals, &mut recording);
                 }
             }
 
@@ -541,7 +632,7 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
                             p.capture.frames_in,
                             p.capture.empty_polls,
                             p.capture.recreates,
-                            p.ring.segments_written,
+                            p.ring.as_ref().map_or(0, |r| r.segments_written),
                             p.encoder.need_input_events,
                             p.encoder.inputs
                         )
@@ -549,24 +640,166 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
                     .unwrap_or_default();
                 crate::lifecycle::log(&format!("rebuilding: {reason}{detail}"));
                 emit(serde_json::json!({ "event": "rebuilding", "reason": reason }));
-                if let Some(mut p) = pipeline.take() {
-                    p.finish();
-                    collect(&mut totals, &p);
+                retire(pipeline.take(), &mut totals, &mut recording);
+            }
+        }
+
+        // ── recording on demand ───────────────────────────────────────────────────
+        let mut toggles = 0u32;
+        let mut saves_asked = 0u32;
+        for id in hotkey::fired() {
+            match id {
+                hotkey::SAVE => saves_asked += 1,
+                hotkey::RECORD => toggles += 1,
+                _ => {}
+            }
+        }
+        if options.record_after > 0.0 && !record_fired && elapsed >= options.record_after {
+            record_fired = true;
+            toggles += 1;
+        }
+        if options.record_for > 0.0
+            && record_wanted
+            && record_fired
+            && elapsed >= record_started_at + options.record_for
+        {
+            toggles += 1;
+        }
+        let mut record_asked: Vec<Option<bool>> = (0..toggles).map(|_| None).collect();
+
+        // ── control ───────────────────────────────────────────────────────────────
+        while let Some(command) = control.as_ref().and_then(|c| c.try_recv()) {
+            if !matches!(command, Command::Status) {
+                crate::lifecycle::log(&format!("command: {command:?}"));
+            }
+            match command {
+                Command::Quit => quit = true,
+                Command::Save => saves_asked += 1,
+                Command::Record(on) => record_asked.push(on),
+                Command::Status => emit(status(
+                    &config,
+                    shown(&monitor, &selector, display_present),
+                    &panel,
+                    display_present,
+                    pipeline.as_ref(),
+                    &front,
+                    &watcher,
+                    &save_key,
+                    &record_key,
+                    record_status(record_wanted, record_since, recording.as_ref()),
+                )),
+                Command::Reload => {
+                    let Some(path) = &options.config_path else { continue };
+                    let next = Config::load(path);
+                    let restart = config.needs_restart(&next);
+
+                    // Both at once, whenever either changes: swapping the two combinations over
+                    // would otherwise find the new one still held by the old registration.
+                    if (config.enabled, &config.hotkey, config.record.enabled, &config.record.hotkey)
+                        != (next.enabled, &next.hotkey, next.record.enabled, &next.record.hotkey)
+                    {
+                        drop(save_key.take());
+                        drop(record_key.take());
+                        save_key = register(next.enabled, &next.hotkey, hotkey::SAVE);
+                        record_key = register(next.record.enabled, &next.record.hotkey, hotkey::RECORD);
+                    }
+                    if restart {
+                        retire(pipeline.take(), &mut totals, &mut recording);
+                        selector = monitor_selector(&next);
+                        match monitors::list().ok().and_then(|all| monitors::resolve(&all, &selector)) {
+                            Some(m) => {
+                                monitor = m;
+                                panel = display::probe(monitor.handle, &monitor.device);
+                                display_present = true;
+                            }
+                            None => display_present = false,
+                        }
+                    }
+                    // Applied in place rather than through a rebuild, so dragging the slider
+                    // does not cost the footage already buffered.
+                    if let Some(mixer) = pipeline.as_mut().and_then(|p| p.audio.as_mut()) {
+                        mixer.set_mic_gain(next.audio.mic_gain_db);
+                        mixer.set_noise(next.audio.noise_suppression, next.audio.noise_strength);
+                    }
+                    // Switching the feature off is the one way to be sure nothing is recording.
+                    if !next.record.enabled && record_wanted {
+                        record_asked.push(Some(false));
+                    }
+                    crate::lifecycle::log(&format!(
+                        "config reloaded{}",
+                        if restart { " (pipeline restarted)" } else { "" }
+                    ));
+                    config = next;
+                    // The panel is waiting on this to redraw. Sending the new state straight away
+                    // is the difference between a control that responds and one that looks stuck
+                    // until the next poll happens to come round.
+                    emit(serde_json::json!({ "event": "reloaded", "restarted": restart }));
+                    emit(status(
+                        &config,
+                        shown(&monitor, &selector, display_present),
+                        &panel,
+                        display_present,
+                        pipeline.as_ref(),
+                        &front,
+                        &watcher,
+                        &save_key,
+                        &record_key,
+                        record_status(record_wanted, record_since, recording.as_ref()),
+                    ));
+                }
+                // The settings panel cannot capture Alt+F-key itself — Windows eats those above
+                // every layer Electron can reach — so it asks the daemon, which can install a
+                // low-level hook. See hotkey.rs.
+                Command::Listen => {
+                    let reply = emitter.clone();
+                    hotkey::listen(std::time::Duration::from_secs(15), move |spec| {
+                        if let Some(reply) = reply {
+                            reply.emit(&serde_json::json!({
+                                "event": "hotkey-captured",
+                                "spec": spec,
+                            }));
+                        }
+                    });
+                }
+                Command::Unknown(what) => {
+                    emit(serde_json::json!({ "event": "error", "message": format!("unknown command: {what}") }));
+                }
+            }
+        }
+
+        for on in record_asked {
+            let start = on.unwrap_or(!record_wanted);
+            if start == record_wanted {
+                continue;
+            }
+            if start {
+                record_wanted = true;
+                record_since = Some(std::time::Instant::now());
+                record_started_at = elapsed;
+                crate::lifecycle::log("recording requested");
+            } else {
+                record_wanted = false;
+                record_since = None;
+                rolling_over = false;
+                if let Some(rec) = recording.take() {
+                    stop_recording(rec, false, &mut finishing, &options.ffmpeg, &emit);
+                } else {
+                    // Asked for and stopped before there was ever a picture to put in it.
+                    emit(serde_json::json!({ "event": "record-stopped", "path": null }));
                 }
             }
         }
 
         // `worth_recording`, not `is_game`: a clip filed in the wrong folder can be moved, and a
-        // clip that was never recorded cannot.
-        let should_record = config.enabled
-            && display_present
-            && (config.record_mode != "game" || front.worth_recording);
+        // clip that was never recorded cannot. A recording overrides all of it — it was asked for.
+        let replay_wants = config.enabled && (config.record_mode != "game" || front.worth_recording);
+        let should_run = display_present && (replay_wants || record_wanted);
 
-        if should_record && pipeline.is_none() {
-            match Pipeline::start(&config, &monitor) {
+        if should_run && pipeline.is_none() {
+            match Pipeline::start(&config, &monitor, config.enabled) {
                 Ok(p) => {
                     crate::lifecycle::log(&format!(
-                        "recording {}x{} from {} ({}, {}-{} Mbps, {}{}, {} candidate(s) rejected first)",
+                        "capturing {}x{} from {} ({}, {}-{} Mbps, {}{}, {} candidate(s) rejected first){}",
                         p.width,
                         p.height,
                         monitor.friendly,
@@ -575,10 +808,20 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
                         p.max_bitrate / 1_000_000,
                         p.encoder.applied.join(" "),
                         if p.converter.resampling { " resampled" } else { "" },
-                        p.encoder.rejected
+                        p.encoder.rejected,
+                        if record_wanted && !replay_wants { " for a recording" } else { "" }
                     ));
-                    emit(serde_json::json!({ "event": "state", "recording": true }));
                     last_error.clear();
+                    // A recording carries on across a rebuild only into a pipeline that makes the
+                    // same kind of picture and sound; otherwise this file ends here and the next
+                    // one starts below.
+                    if recording.as_ref().is_some_and(|r| r.format != p.format()) {
+                        crate::lifecycle::log("the picture or sound changed shape; the recording continues in a new file");
+                        if let Some(rec) = recording.take() {
+                            stop_recording(rec, true, &mut finishing, &options.ffmpeg, &emit);
+                            rolling_over = true;
+                        }
+                    }
                     pipeline = Some(p);
                 }
                 Err(e) => {
@@ -595,28 +838,92 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
                     std::thread::sleep(std::time::Duration::from_secs(5));
                 }
             }
-        } else if !should_record && pipeline.is_some() {
-            if let Some(mut p) = pipeline.take() {
-                p.finish();
-                collect(&mut totals, &p);
+        } else if !should_run && pipeline.is_some() {
+            // Replay switched off: the buffer is not coming back, and with the daemon now staying
+            // up for the record hotkey, nothing else would sweep it until replay is switched on.
+            if !config.enabled {
+                if let Some(p) = &mut pipeline {
+                    let _ = p.set_replay(false, &config);
+                }
             }
-            crate::lifecycle::log("stopped recording (nothing in focus worth keeping)");
-            emit(serde_json::json!({ "event": "state", "recording": false }));
+            retire(pipeline.take(), &mut totals, &mut recording);
+            crate::lifecycle::log(if config.enabled {
+                "stopped capturing (nothing in focus worth keeping)"
+            } else {
+                "stopped capturing (instant replay is off and nothing is being recorded)"
+            });
+        }
+
+        // Replay switched while a recording holds the pipeline up: only the ring changes.
+        if let Some(p) = &mut pipeline {
+            if p.ring.is_some() != config.enabled {
+                if let Err(e) = p.set_replay(config.enabled, &config) {
+                    crate::lifecycle::log(&format!("replay buffer: {e}"));
+                    emit(serde_json::json!({ "event": "error", "message": format!("replay buffer: {e}") }));
+                }
+            }
+        }
+
+        if record_wanted && recording.is_none() {
+            if let Some(p) = &mut pipeline {
+                match Recording::start(&config.recordings_dir(), p.format()) {
+                    Ok(rec) => {
+                        // Otherwise the file opens on the stream's next natural keyframe, up to
+                        // two seconds after the hotkey.
+                        let forced = p.encoder.force_keyframe();
+                        crate::lifecycle::log(&format!(
+                            "recording to {}{}",
+                            rec.path().display(),
+                            if forced { "" } else { " (keyframe not forced; starts on the next one)" }
+                        ));
+                        // `continued` marks the next file of a recording that rolled over, so the
+                        // app does not announce a start nobody asked for.
+                        emit(serde_json::json!({
+                            "event": "record-started",
+                            "path": rec.path().to_string_lossy(),
+                            "continued": rolling_over,
+                        }));
+                        rolling_over = false;
+                        recording = Some(rec);
+                    }
+                    Err(e) => {
+                        crate::lifecycle::log(&format!("cannot start a recording: {e}"));
+                        emit(serde_json::json!({ "event": "error", "message": format!("recording: {e}") }));
+                        record_wanted = false;
+                        record_since = None;
+                    }
+                }
+            }
+        }
+
+        let now_buffering = pipeline.as_ref().is_some_and(|p| p.ring.is_some());
+        if now_buffering != buffering {
+            buffering = now_buffering;
+            emit(serde_json::json!({ "event": "state", "recording": buffering }));
         }
 
         // ── one frame, or idle ────────────────────────────────────────────────────
         // The deliberate stall. Everything else carries on exactly as it would: the loop runs, the
-        // daemon answers, nothing errors — only the frames stop.
-        let faking_a_stall = options.stall_after > 0.0
+        // daemon answers, nothing errors — only the frames stop. It is the pipeline running when
+        // the stall begins that wedges, and the one the watchdog builds to replace it runs
+        // normally, as it would after a real wedge; stalling that one too left it built but
+        // unticked for seconds, and its first frames then came out with a hole between them.
+        let in_stall_window = options.stall_after > 0.0
             && elapsed >= options.stall_after
             && elapsed < options.stall_after + 10.0;
+        if in_stall_window && stall_victim.is_none() {
+            stall_victim = pipeline.as_ref().map(|p| p.started);
+        }
+        let faking_a_stall = in_stall_window
+            && stall_victim.is_some()
+            && pipeline.as_ref().map(|p| p.started) == stall_victim;
         if faking_a_stall {
             std::thread::sleep(std::time::Duration::from_millis(16));
         }
 
         match &mut pipeline {
             Some(_) if faking_a_stall => {}
-            Some(p) => match p.tick() {
+            Some(p) => match p.tick(recording.as_mut()) {
                 Ok(()) => p.errors = 0,
                 Err(e) => {
                     p.errors += 1;
@@ -625,26 +932,37 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
                             "pipeline failed {TICK_ERROR_LIMIT} ticks running ({e}); rebuilding"
                         ));
                         emit(serde_json::json!({ "event": "rebuilding", "reason": e.to_string() }));
-                        if let Some(mut p) = pipeline.take() {
-                            p.finish();
-                            collect(&mut totals, &p);
-                        }
+                        retire(pipeline.take(), &mut totals, &mut recording);
                     }
                 }
             },
             None => std::thread::sleep(std::time::Duration::from_millis(200)),
         }
 
+        // A recording that cannot write — a full disk, a drive pulled out — is stopped and what it
+        // holds is kept, rather than going on "recording" into nothing.
+        if let Some(message) = recording.as_ref().and_then(|r| r.error()).map(str::to_string) {
+            crate::lifecycle::log(&format!("recording stopped: {message}"));
+            emit(serde_json::json!({ "event": "error", "message": format!("recording stopped: {message}") }));
+            record_wanted = false;
+            record_since = None;
+            if let Some(rec) = recording.take() {
+                stop_recording(rec, false, &mut finishing, &options.ffmpeg, &emit);
+            }
+        }
+
         // ── saving ────────────────────────────────────────────────────────────────
-        let fired = key.as_ref().map(|k| k.taken()).unwrap_or(0);
         let auto = options.save_after > 0.0 && !save_fired && elapsed >= options.save_after;
-        if fired > 0 || auto {
+        if auto {
             save_fired = true;
-            match &mut pipeline {
-                Some(p) => {
+            saves_asked += 1;
+        }
+        for _ in 0..saves_asked {
+            match pipeline.as_mut().and_then(|p| p.ring.as_mut()) {
+                Some(ring) => {
                     let out = save_path(&config, &front);
                     crate::lifecycle::log(&format!("saving {}", out.display()));
-                    saves.push(p.ring.save(
+                    saves.push(ring.save(
                         (config.buffer_seconds * 1000.0) as u64,
                         out,
                         options.ffmpeg.clone(),
@@ -653,7 +971,11 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
                 None => {
                     emit(serde_json::json!({
                         "event": "error",
-                        "message": "nothing is being recorded right now",
+                        "message": if config.enabled {
+                            "nothing is being recorded right now"
+                        } else {
+                            "instant replay is off"
+                        },
                     }));
                 }
             }
@@ -692,121 +1014,34 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
             Err(_) => true,
         });
 
-        // ── control ───────────────────────────────────────────────────────────────
-        while let Some(command) = control.as_ref().and_then(|c| c.try_recv()) {
-            if !matches!(command, Command::Status) {
-                crate::lifecycle::log(&format!("command: {command:?}"));
-            }
-            match command {
-                Command::Quit => quit = true,
-                Command::Save => {
-                    if let Some(p) = &mut pipeline {
-                        saves.push(p.ring.save(
-                            (config.buffer_seconds * 1000.0) as u64,
-                            save_path(&config, &front),
-                            options.ffmpeg.clone(),
-                        ));
-                    } else {
-                        emit(serde_json::json!({
-                            "event": "error",
-                            "message": "nothing is being recorded right now",
-                        }));
-                    }
+        finishing.retain(|rx| loop {
+            match rx.try_recv() {
+                Ok(outcome) => {
+                    let value = recorded(outcome, &emit);
+                    results.push(value);
+                    // A recovery sends one result per orphan; keep reading the same channel.
+                    continue;
                 }
-                Command::Status => emit(status(
-                    &config,
-                    shown(&monitor, &selector, display_present),
-                    &panel,
-                    display_present,
-                    pipeline.as_ref(),
-                    &front,
-                    &watcher,
-                    key.is_ok(),
-                )),
-                Command::Reload => {
-                    let Some(path) = &options.config_path else { continue };
-                    let next = Config::load(path);
-                    let restart = config.needs_restart(&next);
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break false,
+                Err(_) => break true,
+            }
+        });
+    }
 
-                    if config.hotkey != next.hotkey {
-                        drop(key);
-                        key = hotkey::Hotkey::register(&next.hotkey);
-                        if let Err(e) = &key {
-                            emit(serde_json::json!({
-                                "event": "error",
-                                "message": format!("hotkey: {}", e.message()),
-                            }));
-                        }
-                    }
-                    if restart {
-                        if let Some(mut p) = pipeline.take() {
-                            p.finish();
-                            collect(&mut totals, &p);
-                        }
-                        selector = monitor_selector(&next);
-                        match monitors::list().ok().and_then(|all| monitors::resolve(&all, &selector)) {
-                            Some(m) => {
-                                monitor = m;
-                                panel = display::probe(monitor.handle, &monitor.device);
-                                display_present = true;
-                            }
-                            None => display_present = false,
-                        }
-                    }
-                    // Applied in place rather than through a rebuild, so dragging the slider
-                    // does not cost the footage already buffered.
-                    if let Some(mixer) = pipeline.as_mut().and_then(|p| p.audio.as_mut()) {
-                        mixer.set_mic_gain(next.audio.mic_gain_db);
-                        mixer.set_noise(next.audio.noise_suppression, next.audio.noise_strength);
-                    }
-                    crate::lifecycle::log(&format!(
-                        "config reloaded{}",
-                        if restart { " (pipeline restarted)" } else { "" }
-                    ));
-                    config = next;
-                    // The panel is waiting on this to redraw. Sending the new state straight away
-                    // is the difference between a control that responds and one that looks stuck
-                    // until the next poll happens to come round.
-                    emit(serde_json::json!({ "event": "reloaded", "restarted": restart }));
-                    emit(status(
-                        &config,
-                        shown(&monitor, &selector, display_present),
-                        &panel,
-                        display_present,
-                        pipeline.as_ref(),
-                        &front,
-                        &watcher,
-                        key.is_ok(),
-                    ));
-                }
-                // The settings panel cannot capture Alt+F-key itself — Windows eats those above
-                // every layer Electron can reach — so it asks the daemon, which can install a
-                // low-level hook. See hotkey.rs.
-                Command::Listen => {
-                    let reply = emitter.clone();
-                    hotkey::listen(std::time::Duration::from_secs(15), move |spec| {
-                        if let Some(reply) = reply {
-                            reply.emit(&serde_json::json!({
-                                "event": "hotkey-captured",
-                                "spec": spec,
-                            }));
-                        }
-                    });
-                }
-                Command::Unknown(what) => {
-                    emit(serde_json::json!({ "event": "error", "message": format!("unknown command: {what}") }));
-                }
-            }
+    if let Some(rec) = recording.take() {
+        // Whatever the pipeline still holds belongs in the file before it closes.
+        let mut rec = rec;
+        if let Some(mut p) = pipeline.take() {
+            p.finish(Some(&mut rec));
+            collect(&mut totals, &p);
         }
+        stop_recording(rec, false, &mut finishing, &options.ffmpeg, &emit);
     }
-
-    if let Some(mut p) = pipeline.take() {
-        p.finish();
-        collect(&mut totals, &p);
-    }
+    retire(pipeline.take(), &mut totals, &mut recording);
 
     // A save started near the end is a background copy and has to be allowed to finish rather than
-    // be killed by the daemon shutting down.
+    // be killed by the daemon shutting down. A recording's remux is the same, and if Clipper exits
+    // first and takes this process with it, the `.ts` is left for `record::recover` to finish.
     for rx in saves {
         match rx.recv() {
             Ok(Ok(outcome)) => results.push(serde_json::json!({
@@ -818,6 +1053,11 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
             })),
             Ok(Err(message)) => results.push(serde_json::json!({ "error": message })),
             Err(_) => {}
+        }
+    }
+    for rx in finishing {
+        for outcome in rx.iter() {
+            results.push(recorded(outcome, &emit));
         }
     }
 
@@ -832,11 +1072,109 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
     }))
 }
 
+fn new_ring(config: &Config, has_audio: bool) -> std::io::Result<ring::Ring> {
+    ring::Ring::new(
+        &config.segment_dir(),
+        config::GOP_SECONDS as f64,
+        config.buffer_seconds,
+        has_audio,
+    )
+}
+
+/// Takes a pipeline out of service. What it still holds goes to the ring and to the recording, and
+/// the recording is left waiting for whichever pipeline comes next.
+fn retire(p: Option<Pipeline>, totals: &mut (u64, u64, u64, u64), rec: &mut Option<Recording>) {
+    if let Some(mut p) = p {
+        p.finish(rec.as_mut());
+        collect(totals, &p);
+    }
+    if let Some(r) = rec {
+        r.detach();
+    }
+}
+
+/// `continuing` is a file ending because the recording rolls over into a new one, not because it
+/// was stopped — the app keeps its clock running rather than showing it stopped.
+fn stop_recording(
+    rec: Recording,
+    continuing: bool,
+    finishing: &mut Vec<std::sync::mpsc::Receiver<Result<record::Outcome, String>>>,
+    ffmpeg: &std::path::Path,
+    emit: &dyn Fn(serde_json::Value),
+) {
+    crate::lifecycle::log(&format!(
+        "recording stopped at {} s, {} MB; finishing {}",
+        rec.duration_ms() / 1000,
+        rec.bytes / 1_000_000,
+        rec.path().display()
+    ));
+    emit(serde_json::json!({
+        "event": "record-stopped",
+        "path": rec.path().to_string_lossy(),
+        "durationMs": rec.duration_ms(),
+        "continuing": continuing,
+    }));
+    finishing.push(rec.finish(ffmpeg.to_path_buf()));
+}
+
+/// Reports one finished recording, for the log, the UI and the `record` subcommand's summary.
+fn recorded(outcome: Result<record::Outcome, String>, emit: &dyn Fn(serde_json::Value)) -> serde_json::Value {
+    match outcome {
+        Ok(o) => {
+            crate::lifecycle::log(&format!(
+                "recording saved: {} ({} s, {} MB, remuxed in {:.0} ms)",
+                o.path.display(),
+                o.duration_ms / 1000,
+                o.bytes / 1_000_000,
+                o.elapsed_ms
+            ));
+            emit(serde_json::json!({
+                "event": "record-saved",
+                "path": o.path.to_string_lossy(),
+                "durationMs": o.duration_ms,
+                "bytes": o.bytes,
+            }));
+            serde_json::json!({
+                "recording": o.path.to_string_lossy(),
+                "durationMs": o.duration_ms,
+                "bytes": o.bytes,
+                "elapsedMs": o.elapsed_ms,
+            })
+        }
+        Err(message) => {
+            crate::lifecycle::log(&format!("recording could not be finished: {message}"));
+            emit(serde_json::json!({ "event": "error", "message": format!("recording: {message}") }));
+            serde_json::json!({ "recordingError": message })
+        }
+    }
+}
+
+/// What the panel and the titlebar need to show a recording: whether one was asked for, whether
+/// it has a picture yet, and how far it has got.
+fn record_status(
+    wanted: bool,
+    since: Option<std::time::Instant>,
+    rec: Option<&Recording>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "active": wanted,
+        // Asked for, but no frame written yet: the display is missing, or the pipeline is still
+        // coming up. Worth saying, since the hotkey was pressed and the file is not growing.
+        "waiting": wanted && rec.map_or(true, |r| r.waiting()),
+        "elapsedMs": since.map(|t| t.elapsed().as_millis() as u64),
+        "durationMs": rec.map(|r| r.duration_ms()),
+        "bytes": rec.map(|r| r.bytes),
+        "path": rec.map(|r| r.path().to_string_lossy().to_string()),
+    })
+}
+
 fn collect(totals: &mut (u64, u64, u64, u64), p: &Pipeline) {
     totals.0 += p.video_packets;
     totals.1 += p.audio_packets;
-    totals.2 += p.ring.segments_written;
-    totals.3 += p.ring.bytes_written;
+    if let Some(ring) = &p.ring {
+        totals.2 += ring.segments_written;
+        totals.3 += ring.bytes_written;
+    }
 }
 
 /// Friendly name first — it survives a display being replugged, which the GDI device name does not.
@@ -859,7 +1197,7 @@ fn save_path(config: &Config, front: &foreground::Foreground) -> PathBuf {
     if config.per_game_subfolder {
         dir = dir.join(front.category());
     }
-    dir.join(crate::timestamp_name())
+    dir.join(crate::timestamp_name("clip"))
 }
 
 /// Everything the settings panel needs to say something true about what is happening.
@@ -875,15 +1213,20 @@ fn status(
     pipeline: Option<&Pipeline>,
     front: &foreground::Foreground,
     watcher: &foreground::Watcher,
-    hotkey_ok: bool,
+    save_key: &Option<windows::core::Result<hotkey::Hotkey>>,
+    record_key: &Option<windows::core::Result<hotkey::Hotkey>>,
+    record: serde_json::Value,
 ) -> serde_json::Value {
     let tier = config.tier();
     serde_json::json!({
         "event": "status",
-        "recording": pipeline.is_some(),
+        // The replay buffer is running. The pipeline can also be up for a recording alone, which is
+        // `capturing` without `recording`.
+        "recording": pipeline.is_some_and(|p| p.ring.is_some()),
+        "capturing": pipeline.is_some(),
         "enabled": config.enabled,
         "recordMode": config.record_mode,
-        "bufferedMs": pipeline.map(|p| p.ring.buffered_90k() * 1000 / ring::HZ).unwrap_or(0),
+        "bufferedMs": pipeline.and_then(|p| p.ring.as_ref()).map(|r| r.buffered_90k() * 1000 / ring::HZ).unwrap_or(0),
         "bufferSeconds": config.buffer_seconds,
         "monitor": monitor,
         "displayPresent": display_present,
@@ -901,7 +1244,7 @@ fn status(
         "framesDropped": pipeline.map(|p| p.encoder.dropped),
         "captureFramesIn": pipeline.map(|p| p.capture.frames_in),
         "poolRebuilds": pipeline.map(|p| p.capture.recreates),
-        "segmentsWritten": pipeline.map(|p| p.ring.segments_written),
+        "segmentsWritten": pipeline.and_then(|p| p.ring.as_ref()).map(|r| r.segments_written),
         "sinceProgressMs": pipeline.map(|p| (p.since_progress() * 1000.0).round()),
         "desktopAudio": config.audio.desktop,
         "micWanted": config.audio.mic,
@@ -940,6 +1283,11 @@ fn status(
         "gameDetection": config.game_detection,
         "measuresGpu": watcher.measures_gpu(),
         "hotkey": config.hotkey,
-        "hotkeyOk": hotkey_ok,
+        // A hotkey that is not wanted is not failing; only a refused registration is.
+        "hotkeyOk": !matches!(save_key, Some(Err(_))),
+        "recordEnabled": config.record.enabled,
+        "recordHotkey": config.record.hotkey,
+        "recordHotkeyOk": !matches!(record_key, Some(Err(_))),
+        "record": record,
     })
 }

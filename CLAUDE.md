@@ -125,6 +125,14 @@ Alt+F-key. The hook swallows what it captures, so choosing a hotkey cannot also 
 alone is declined on purpose — `RegisterHotKey` would grant it and take the one shortcut everybody
 knows away from every window on the machine.
 
+**Recording on demand shares the replay's encoder.** A second hotkey (`record.hotkey`, default
+`Alt+F9`) makes `record.rs` tee the packets already going to the ring into one growing
+`Recordings\rec_*.ts`, remuxed to MP4 on stop. So a recording has no quality settings of its own,
+and the replay hotkey works in the middle of one. Either `enabled` or `record.enabled` keeps the
+daemon alive (`captureWanted()` in both `main.js` and `renderer.js`), and the panel's shared
+settings stay live while either is on — `.for-replay` / `.for-record` fade with their own switch.
+Do not reach for a second encoder; see "Recording on demand" in `capture/DESIGN.md`.
+
 `parse()` and `key_name()` in `hotkey.rs` are inverses over a shared `NAMED` table and there is a
 test that says so; a key the daemon can capture must be one it can register.
 
@@ -234,6 +242,12 @@ Notes that cost time to rediscover:
   `%APPDATA%/Electron/` while `npm start` writes `%APPDATA%/clipper/`. Good news — the real config
   is never at risk — but it also means a harness reading back `capture.json` or `prefs.json` is
   reading its own copy, and a value that looks wrong there usually is not.
+- **A running Clipper blocks the harness's recorder.** Its daemon holds the single-instance mutex and
+  the pipe name, so a harness daemon exits on the spot and every capture event looks broken. Set
+  `process.env.CLIPPER_CAPTURE_INSTANCE = 'harness'` at the top of the harness, before requiring
+  `main.js`: it suffixes both names, and the spawned daemon inherits it. Headless, `clipper-capture
+  record --record-after 3 --record-for 10 --save-after 8 --out <dir>` exercises a recording and a
+  replay save together; `--no-replay` is the record-only case.
 - Build fixtures with `ffmpeg-bin/ffmpeg.exe` into a scratchpad folder; never point a harness at the
   user's real clips folder for anything that writes.
 - The `Content Security Policy` warning about the Google Fonts stylesheet is pre-existing noise.

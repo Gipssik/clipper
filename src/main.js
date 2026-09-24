@@ -135,7 +135,7 @@ function createWindow() {
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
 
   mainWindow.on('close', (e) => {
-    if (quitting || !loadCaptureConfig().enabled) return;
+    if (quitting || !captureWanted(loadCaptureConfig())) return;
     e.preventDefault();
     mainWindow.hide();
   });
@@ -172,7 +172,7 @@ app.whenReady().then(() => {
   repairAutostart();
   createWindow();
   setupTray();
-  if (loadCaptureConfig().enabled) startCaptureDaemon();
+  if (captureWanted(loadCaptureConfig())) startCaptureDaemon();
 
   // The settings panel's list of screens is a snapshot, and a screen switched on after boot is
   // exactly the one somebody opens the panel to pick. The daemon only watches the display it
@@ -185,7 +185,7 @@ app.whenReady().then(() => {
 // With capture on, closing the window leaves the recorder running — that is the whole point of a
 // replay buffer. The tray icon is then the only way back, which is why it is always created.
 app.on('window-all-closed', () => {
-  if (!loadCaptureConfig().enabled) app.quit();
+  if (!captureWanted(loadCaptureConfig())) app.quit();
 });
 
 app.on('before-quit', () => { quitting = true; stopCaptureDaemon(); });
@@ -324,6 +324,11 @@ ipcMain.handle('folder:watch', (_, rootPath) => {
   const watchDir = (dirPath) => {
     try {
       const w = fs.watch(dirPath, { persistent: false }, (event, filename) => {
+        // A recording in progress is a .ts growing by a few megabytes a second, and it is published
+        // through a .part. Neither is in the grid, and a change event per write would hold the
+        // debounced rescan off for as long as the recording runs — a replay saved meanwhile would
+        // not show up until it stopped.
+        if (filename && /\.(ts|part)$/i.test(filename)) return;
         if (filename && mainWindow) mainWindow.webContents.send('folder:changed');
       });
       watchers.set(dirPath, w);
@@ -391,7 +396,10 @@ ipcMain.handle('window:close', () => mainWindow.close());
 // and it is configured through a file of its own rather than prefs.json — savePrefs() rewrites
 // that whole file from the renderer's settings object, which would race a daemon reading it.
 
-const CAPTURE_PIPE = '\\\\.\\pipe\\clipper-capture';
+// CLIPPER_CAPTURE_INSTANCE suffixes the pipe here and, inherited, the pipe and mutex in the daemon,
+// so a test harness can drive its own recorder while a real Clipper is running.
+const CAPTURE_PIPE = '\\\\.\\pipe\\clipper-capture' +
+  (process.env.CLIPPER_CAPTURE_INSTANCE ? '-' + process.env.CLIPPER_CAPTURE_INSTANCE : '');
 const captureConfigPath = path.join(app.getPath('userData'), 'capture.json');
 
 const CAPTURE_DEFAULTS = {
@@ -406,6 +414,9 @@ const CAPTURE_DEFAULTS = {
   outputPath: '',
   perGameSubfolder: true,
   hotkey: 'Ctrl+Alt+F12',
+  // Recording on demand. Its own switch, because it keeps the daemon running with replay off —
+  // idle until the hotkey is pressed, but still a process and a registered hotkey.
+  record: { enabled: false, hotkey: 'Alt+F9' },
   audio: { desktop: true, mic: true, micDevice: '', micGainDb: 0, noiseSuppression: false, noiseStrength: 70 },
   toneMap: 'auto',
   segmentDir: null,
@@ -460,8 +471,15 @@ function loadCaptureConfig() {
       ...CAPTURE_DEFAULTS,
       ...saved,
       audio: { ...CAPTURE_DEFAULTS.audio, ...(saved.audio || {}) },
+      record: { ...CAPTURE_DEFAULTS.record, ...(saved.record || {}) },
     };
-  } catch { return { ...CAPTURE_DEFAULTS, audio: { ...CAPTURE_DEFAULTS.audio } }; }
+  } catch { return { ...CAPTURE_DEFAULTS, audio: { ...CAPTURE_DEFAULTS.audio }, record: { ...CAPTURE_DEFAULTS.record } }; }
+}
+
+// Either feature keeps the daemon alive: replay because it is always buffering, recording because
+// the hotkey has to be registered by something that is running when it is pressed.
+function captureWanted(config) {
+  return !!(config.enabled || (config.record && config.record.enabled));
 }
 
 // Written temp-then-rename so the daemon can never read a half-written file.
@@ -471,9 +489,9 @@ function writeCaptureConfig(config) {
   fs.renameSync(tmp, captureConfigPath);
 }
 
-function sendCapture(cmd) {
+function sendCapture(cmd, extra) {
   if (!capture.sock) return false;
-  try { capture.sock.write(JSON.stringify({ cmd }) + '\n'); return true; }
+  try { capture.sock.write(JSON.stringify({ cmd, ...extra }) + '\n'); return true; }
   catch { return false; }
 }
 
@@ -489,7 +507,7 @@ function startCaptureDaemon() {
       if (capture.dying !== previous && capture.dying !== null) return;
       capture.dying = null;
       capture.starting = false;
-      if (loadCaptureConfig().enabled) startCaptureDaemon();
+      if (captureWanted(loadCaptureConfig())) startCaptureDaemon();
     };
     previous.once('exit', go);
     setTimeout(go, 3000);
@@ -597,7 +615,15 @@ function handleCaptureEvent(event) {
     if (capture.awaitingStatus) { capture.awaitingStatus(event); capture.awaitingStatus = null; }
   }
   if (event.event === 'state') capture.status = { ...(capture.status || {}), recording: event.recording };
+  // The tray needs to know a recording is running the moment it starts, not at the next status.
+  // A file that ends only because the recording rolls over into the next one is not a stop.
+  if (event.event === 'record-started' || (event.event === 'record-stopped' && !event.continuing)) {
+    const record = (capture.status && capture.status.record) || {};
+    capture.status = { ...(capture.status || {}), record: { ...record, active: event.event === 'record-started' } };
+  }
+  if (event.event === 'record-started' && !event.continued) notifyRecordingStarted();
   if (event.event === 'clip-saved') notifyClipSaved(event);
+  if (event.event === 'record-saved') notifyRecordingSaved(event);
   updateTray();
   sendCaptureEvent(event);
 }
@@ -619,6 +645,45 @@ function notifyClipSaved(event) {
   });
   toast.on('click', showWindow);
   toast.show();
+}
+
+// The hotkey toggles, and over a full-screen game there is nothing else to say which way it went —
+// without this, the first sign a press did not take is finding no recording afterwards. Fired when
+// the file actually opens, not on the keypress, so it means the recording really is running. It
+// names the key that stops it, since that is the next thing anybody needs.
+function notifyRecordingStarted() {
+  if (!Notification.isSupported()) return;
+  const config = loadCaptureConfig();
+  if (config.notifyOnSave === false) return;
+  const toast = new Notification({
+    title: 'Recording',
+    body: `Press ${config.record.hotkey} again to stop`,
+    icon: trayIcon('tray.png'),
+    silent: true,
+  });
+  toast.on('click', showWindow);
+  toast.show();
+}
+
+// Same reasoning as a saved replay: the hotkey that stopped it was pressed over a game.
+function notifyRecordingSaved(event) {
+  if (!Notification.isSupported()) return;
+  if (loadCaptureConfig().notifyOnSave === false) return;
+  const toast = new Notification({
+    title: 'Recording saved',
+    body: formatLength(event.durationMs) + ' \u00b7 in Recordings',
+    icon: trayIcon('tray.png'),
+    silent: true,
+  });
+  toast.on('click', showWindow);
+  toast.show();
+}
+
+function formatLength(ms) {
+  const total = Math.round((ms || 0) / 1000);
+  const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = total % 60;
+  const pad = (n) => String(n).padStart(2, '0');
+  return h ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
 
 function sendCaptureEvent(event) {
@@ -648,10 +713,13 @@ function updateTray() {
   if (!capture.tray) return;
   const config = loadCaptureConfig();
   const recording = !!(capture.status && capture.status.recording);
+  const taping = !!(capture.status && capture.status.record && capture.status.record.active);
+  const recordOn = !!(config.record && config.record.enabled);
 
-  capture.tray.setImage(trayIcon(recording ? 'tray.png' : 'tray-idle.png'));
+  capture.tray.setImage(trayIcon(recording || taping ? 'tray.png' : 'tray-idle.png'));
   capture.tray.setToolTip(
-    !config.enabled ? 'Clipper — instant replay off'
+    taping ? 'Clipper — recording'
+      : !config.enabled ? (recordOn ? `Clipper — ready to record (${config.record.hotkey})` : 'Clipper — instant replay off')
       : recording ? `Clipper — buffering the last ${Math.round(config.bufferSeconds)}s`
       : 'Clipper — waiting for a game');
 
@@ -669,6 +737,11 @@ function updateTray() {
       enabled: recording,
       click: () => sendCapture('save'),
     },
+    ...(recordOn ? [{
+      label: `${taping ? 'Stop recording' : 'Start recording'}  (${config.record.hotkey})`,
+      enabled: !!capture.proc,
+      click: () => sendCapture('record', { on: !taping }),
+    }] : []),
     { type: 'separator' },
     { label: 'Quit Clipper', click: () => { quitting = true; app.quit(); } },
   ]));
@@ -681,9 +754,10 @@ function applyCaptureConfig(patch) {
   // the other two.
   const after = { ...before, ...patch };
   if (patch.audio) after.audio = { ...before.audio, ...patch.audio };
+  if (patch.record) after.record = { ...before.record, ...patch.record };
   writeCaptureConfig(after);
 
-  if (!after.enabled) {
+  if (!captureWanted(after)) {
     stopCaptureDaemon();
   } else if (!capture.proc) {
     startCaptureDaemon();
@@ -711,6 +785,9 @@ ipcMain.handle('capture:status', () => new Promise((resolve) => {
   capture.awaitingStatus = (status) => { clearTimeout(timer); resolve(status); };
 }));
 ipcMain.handle('capture:save', () => sendCapture('save'));
+// `on` true starts, false stops; the titlebar button always says which, so a click that crosses
+// a hotkey press cannot turn into the opposite of what the button showed.
+ipcMain.handle('capture:record', (_, on) => sendCapture('record', { on: !!on }));
 // Asks the daemon to capture the next combination pressed. The settings window cannot do this
 // itself: Windows consumes Alt+F-key above every layer Electron can reach, so a keydown handler in
 // the panel never sees it. The daemon is a plain Win32 process and can install a low-level hook.

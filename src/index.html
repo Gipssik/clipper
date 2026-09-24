@@ -81,6 +81,23 @@
     letter-spacing: 0.04em; transition: border-color 0.15s, color 0.15s;
   }
   #change-folder-btn:hover { border-color: var(--accent); color: var(--accent); }
+  /* Start and stop a recording, and how long it has been going. Only there while recording on
+     demand is switched on. The dot is deliberately still: a blinking one costs a composited frame
+     per blink for as long as a recording runs, and the running clock beside it already says
+     "live". The clock itself ticks once a second and stops while the window is asleep. */
+  #rec-btn {
+    -webkit-app-region: no-drag; display: none; align-items: center; gap: 7px;
+    padding: 5px 11px; background: var(--surface2); border: 1px solid var(--border2);
+    color: var(--text2); border-radius: 6px; cursor: pointer;
+    font-family: 'Syne', sans-serif; font-size: calc(11px * var(--font-scale)); font-weight: 600;
+    letter-spacing: 0.04em; transition: border-color 0.15s, color 0.15s;
+    font-variant-numeric: tabular-nums;
+  }
+  body.record-ready #rec-btn { display: flex; }
+  #rec-btn:hover { border-color: var(--danger); color: var(--text); }
+  #rec-btn .rec-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--danger); }
+  #rec-btn.live { border-color: var(--danger); color: var(--text); }
+  #rec-btn.live .rec-dot { border-radius: 2px; }
   .wc-btn { -webkit-app-region: no-drag; width: 28px; height: 28px; border: none; background: transparent; cursor: pointer; color: var(--text2); display: flex; align-items: center; justify-content: center; border-radius: 4px; transition: background 0.15s, color 0.15s; }
   .wc-btn:hover { background: var(--surface2); color: var(--text); }
   .wc-btn.close:hover { background: var(--danger); color: #fff; }
@@ -570,6 +587,11 @@
   /* Instant replay */
   #replay-options { transition: opacity 0.15s; }
   #replay-options.off { opacity: 0.35; pointer-events: none; }
+  /* The panel serves two features that share one recorder. Settings that belong to only one of
+     them fade with its switch; the shared ones (quality, screen, audio) stay live while either
+     is on. */
+  #replay-options .for-replay, #replay-options .for-record { transition: opacity 0.15s; }
+  #replay-options .for-replay.off, #replay-options .for-record.off { opacity: 0.35; pointer-events: none; }
   /* The device picker means nothing with the microphone off, and greying it out says so better
      than leaving it live. */
   #replay-mic-device-field, #replay-mic-gain-field, #replay-noise-field,
@@ -610,6 +632,14 @@
   #replay-status.live .dot { background: #e94c4c; }
   #replay-status.live { color: var(--text2); }
   #replay-status.warn .dot { background: #e0a33e; }
+  #record-status {
+    display: flex; align-items: center; gap: 8px; margin-top: 8px;
+    font-size: calc(12px * var(--font-scale)); color: var(--text3);
+  }
+  #record-status .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text3); flex: 0 0 auto; }
+  #record-status.live .dot { background: #e94c4c; }
+  #record-status.live { color: var(--text2); }
+  #record-status.warn .dot { background: #e0a33e; }
   #replay-front {
     margin-top: 10px; padding: 10px 12px; border-radius: 6px;
     background: var(--surface2); border: 1px solid var(--border2);
@@ -830,6 +860,7 @@
   <div class="title-sep"></div>
   <span id="root-folder-display">No folder selected</span>
   <div class="title-spacer"></div>
+  <button id="rec-btn" title="Start recording"><span class="rec-dot"></span><span id="rec-btn-text">Record</span></button>
   <button id="change-folder-btn">Change Folder</button>
   <button class="wc-btn" id="settings-btn" title="Settings">
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1094,7 +1125,7 @@
 
     <div id="settings-tabs">
       <button class="set-tab active" data-tab="library">Library</button>
-      <button class="set-tab" data-tab="replay">Instant replay</button>
+      <button class="set-tab" data-tab="replay">Replay &amp; recording</button>
       <button class="set-tab" data-tab="encoding">Encoding</button>
     </div>
 
@@ -1172,23 +1203,34 @@
         <div class="set-group">
           <div class="enc-tip" style="margin-top:0; margin-bottom:18px">
             Keeps the last stretch of your screen encoded in the background, so a moment you did not know you
-            wanted is still there when you press the hotkey. It runs on your GPU's encode chip rather than the
-            part that draws your game, which is why it costs a few frames rather than a fifth of them.
+            wanted is still there when you press the hotkey — or records from one press to the next when you
+            do know. Both run on your GPU's encode chip rather than the part that draws your game, which is why
+            they cost a few frames rather than a fifth of them.
           </div>
 
           <div class="enc-field">
             <div class="set-toggle-row" id="replay-row">
               <div class="set-toggle-text">
                 <div class="enc-label" style="margin-bottom:6px"><span>Record in the background</span></div>
-                <div class="enc-tip" style="margin-top:0">Starts the recorder with Clipper and keeps it going after you close the window — the tray icon turns red while it is buffering. Turn off and nothing runs.</div>
+                <div class="enc-tip" style="margin-top:0">Starts the recorder with Clipper and keeps it going after you close the window — the tray icon turns red while it is buffering. Turn off and nothing is kept; with recording on demand off as well, nothing runs at all.</div>
               </div>
               <div class="set-switch" id="replay-switch"></div>
             </div>
           </div>
 
+          <div class="enc-field">
+            <div class="set-toggle-row" id="record-row">
+              <div class="set-toggle-text">
+                <div class="enc-label" style="margin-bottom:6px"><span>Record on demand</span></div>
+                <div class="enc-tip" style="margin-top:0">A second hotkey that records everything from one press to the next, into a <b>Recordings</b> folder beside your clips. It is the replay's own stream written to a second file, so it costs disk and nothing else &mdash; and the replay hotkey keeps working in the middle of it. It records the screen whatever is on it; game detection does not apply. With replay off nothing runs until you press it, and the first second goes to starting the encoder.</div>
+              </div>
+              <div class="set-switch" id="record-switch"></div>
+            </div>
+          </div>
+
           <div id="replay-options" class="off">
 
-            <div class="enc-field">
+            <div class="enc-field for-replay">
               <div class="enc-label"><span>Keep the last</span><span class="enc-value" id="replay-buffer-value">1m 00s</span></div>
               <input class="enc-slider" id="replay-buffer-slider" type="range" min="30" max="600" step="30" value="60" />
               <div class="slider-scale"><span>30s</span><span>10m</span></div>
@@ -1213,7 +1255,7 @@
               <div class="enc-tip" id="replay-monitor-tip">Which display to record. Changing it restarts the recorder, so whatever is buffered now is lost.</div>
             </div>
 
-            <div class="enc-field">
+            <div class="enc-field for-replay">
               <div class="enc-label"><span>When to record</span></div>
               <div class="enc-seg" id="replay-mode-seg">
                 <button data-mode="game" class="active">Only in games</button>
@@ -1222,8 +1264,8 @@
               <div class="enc-tip" id="replay-mode-tip"></div>
             </div>
 
-            <div class="enc-field">
-              <div class="enc-label"><span>Hotkey</span></div>
+            <div class="enc-field for-replay">
+              <div class="enc-label"><span>Replay hotkey</span></div>
               <div class="replay-row">
                 <span class="replay-value" id="replay-hotkey-value" style="direction:ltr">Ctrl+Alt+F12</span>
                 <button id="replay-hotkey-btn">Change</button>
@@ -1232,16 +1274,26 @@
               <div class="enc-warn" id="replay-hotkey-warn" style="display:none"></div>
             </div>
 
+            <div class="enc-field for-record">
+              <div class="enc-label"><span>Recording hotkey</span></div>
+              <div class="replay-row">
+                <span class="replay-value" id="record-hotkey-value" style="direction:ltr">Alt+F9</span>
+                <button id="record-hotkey-btn">Change</button>
+              </div>
+              <div class="enc-tip">Press once to start, again to stop. When you stop, the stream is copied into an MP4 rather than re-encoded, so finishing takes about as long as copying the file, and it lands in the grid on its own. The same administrator caveat as the replay hotkey applies.</div>
+              <div class="enc-warn" id="record-hotkey-warn" style="display:none"></div>
+            </div>
+
             <div class="enc-field">
               <div class="enc-label"><span>Save clips to</span></div>
               <div class="replay-row">
                 <span class="replay-value" id="replay-path-value">…</span>
                 <button id="replay-path-btn">Change</button>
               </div>
-              <div class="enc-tip">Point this at your clips folder and saved replays show up in the grid on their own.</div>
+              <div class="enc-tip">Point this at your clips folder and saved replays show up in the grid on their own. Recordings go to a <b>Recordings</b> folder inside it, which the grid shows as a category of its own.</div>
             </div>
 
-            <div class="enc-field">
+            <div class="enc-field for-replay">
               <div class="set-toggle-row" id="replay-pergame-row">
                 <div class="set-toggle-text">
                   <div class="enc-label" style="margin-bottom:6px"><span>A folder per game</span></div>
@@ -1314,16 +1366,17 @@
             <div class="enc-field" style="margin-bottom:0">
               <div class="set-toggle-row" id="replay-notify-row">
                 <div class="set-toggle-text">
-                  <div class="enc-label" style="margin-bottom:6px"><span>Tell me when a clip is saved</span></div>
-                  <div class="enc-tip" style="margin-top:0">A silent Windows notification in the corner of the screen. The hotkey is pressed while you are looking at a game, where Clipper's own toast is somewhere behind it.</div>
+                  <div class="enc-label" style="margin-bottom:6px"><span>Tell me when a clip is saved or a recording starts</span></div>
+                  <div class="enc-tip" style="margin-top:0">A silent Windows notification in the corner of the screen. The hotkey is pressed while you are looking at a game, where Clipper's own toast is somewhere behind it. A recording also says when it has started, since a toggle pressed over a game gives no other sign which way it went.</div>
                 </div>
                 <div class="set-switch on" id="replay-notify-switch"></div>
               </div>
             </div>
 
             <div id="replay-status"><span class="dot"></span><span id="replay-status-text">Not running</span></div>
+            <div id="record-status" style="display:none"><span class="dot"></span><span id="record-status-text"></span></div>
 
-            <div id="replay-front">
+            <div id="replay-front" class="for-replay">
               <div class="front-line" id="replay-front-text">Nothing in front yet.</div>
               <div id="replay-front-actions">
                 <button id="replay-front-game">Treat as a game</button>

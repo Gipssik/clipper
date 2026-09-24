@@ -40,6 +40,9 @@ const BUFFER: u32 = 64 * 1024;
 pub enum Command {
     Status,
     Save,
+    /// Start or stop a recording: `Some(true)` starts, `Some(false)` stops, `None` toggles, which
+    /// is what the hotkey and the tray do.
+    Record(Option<bool>),
     Reload,
     Quit,
     /// Capture the next combination the user presses and report it back.
@@ -135,7 +138,7 @@ fn serve(tx: Sender<Command>, client: Arc<Mutex<Option<Pipe>>>) {
     loop {
         let handle = unsafe {
             CreateNamedPipeW(
-                &HSTRING::from(PIPE_NAME),
+                &HSTRING::from(crate::lifecycle::instance_name(PIPE_NAME)),
                 PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
                 PIPE_UNLIMITED_INSTANCES,
@@ -208,6 +211,7 @@ fn parse(line: &str) -> Command {
     match value.get("cmd").and_then(|c| c.as_str()) {
         Some("status") => Command::Status,
         Some("save") => Command::Save,
+        Some("record") => Command::Record(value.get("on").and_then(|v| v.as_bool())),
         Some("reload") => Command::Reload,
         Some("quit") => Command::Quit,
         Some("listen") => Command::Listen,

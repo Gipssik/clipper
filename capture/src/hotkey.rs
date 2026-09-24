@@ -23,15 +23,19 @@ use windows::Win32::UI::WindowsAndMessaging::{
     KBDLLHOOKSTRUCT, MSG, PM_REMOVE, WH_KEYBOARD_LL, WM_HOTKEY, WM_KEYDOWN, WM_SYSKEYDOWN,
 };
 
-const HOTKEY_ID: i32 = 1;
+/// One id per thing a hotkey can do. Both are registered on the record loop's thread and arrive
+/// on its queue, which is why `fired` drains them together rather than each hotkey peeking for its
+/// own: a `PM_REMOVE` for one would throw the other's message away.
+pub const SAVE: i32 = 1;
+pub const RECORD: i32 = 2;
 
 pub struct Hotkey {
-    registered: bool,
+    id: i32,
     pub spec: String,
 }
 
 impl Hotkey {
-    pub fn register(spec: &str) -> Result<Self> {
+    pub fn register(spec: &str, id: i32) -> Result<Self> {
         let (modifiers, vk) = parse(spec).ok_or_else(|| {
             windows::core::Error::new(
                 windows::Win32::Foundation::E_INVALIDARG,
@@ -39,39 +43,36 @@ impl Hotkey {
             )
         })?;
 
-        // NOREPEAT: holding the combination should save one clip, not one per key repeat.
-        unsafe { RegisterHotKey(None, HOTKEY_ID, modifiers | MOD_NOREPEAT, vk)? };
+        // NOREPEAT: holding the combination should save one clip, not one per key repeat — and
+        // for the record hotkey, should not start a recording and stop it again.
+        unsafe { RegisterHotKey(None, id, modifiers | MOD_NOREPEAT, vk)? };
         Ok(Hotkey {
-            registered: true,
+            id,
             spec: spec.to_string(),
         })
     }
+}
 
-    /// How many times the hotkey fired since the last call.
-    ///
-    /// `RegisterHotKey` posts to the thread that registered it, so this must be called from that
-    /// thread — which is the record loop, and is why it polls rather than blocking on a message
-    /// pump of its own.
-    pub fn taken(&self) -> u32 {
-        let mut count = 0;
-        let mut msg = MSG::default();
-        unsafe {
-            while PeekMessageW(&mut msg, None, WM_HOTKEY, WM_HOTKEY, PM_REMOVE).as_bool() {
-                if msg.wParam.0 as i32 == HOTKEY_ID {
-                    count += 1;
-                }
-            }
+/// The ids of every hotkey that fired since the last call, in order.
+///
+/// `RegisterHotKey` posts to the thread that registered it, so this must be called from that
+/// thread — which is the record loop, and is why it polls rather than blocking on a message
+/// pump of its own.
+pub fn fired() -> Vec<i32> {
+    let mut ids = Vec::new();
+    let mut msg = MSG::default();
+    unsafe {
+        while PeekMessageW(&mut msg, None, WM_HOTKEY, WM_HOTKEY, PM_REMOVE).as_bool() {
+            ids.push(msg.wParam.0 as i32);
         }
-        count
     }
+    ids
 }
 
 impl Drop for Hotkey {
     fn drop(&mut self) {
-        if self.registered {
-            unsafe {
-                let _ = UnregisterHotKey(None, HOTKEY_ID);
-            }
+        unsafe {
+            let _ = UnregisterHotKey(None, self.id);
         }
     }
 }

@@ -27,6 +27,8 @@ pub struct Config {
     /// it lives here because it is a property of the recorder, not of the library window.
     pub notify_on_save: bool,
     pub hotkey: String,
+    /// Recording on demand. Independent of `enabled`: either one keeps the daemon running.
+    pub record: RecordConfig,
     pub audio: AudioConfig,
     /// "auto" follows the display, "always" and "off" override it.
     pub tone_map: String,
@@ -47,6 +49,29 @@ pub struct Config {
 pub struct MonitorSelection {
     pub device: String,
     pub friendly: String,
+}
+
+/// A second hotkey that records from one press to the next.
+///
+/// It has no quality, screen or audio settings of its own, on purpose: a recording is a copy of
+/// the packets the replay pipeline already encodes, so it is the replay's settings by
+/// construction. What it does not share is the replay's idea of *when* — a recording ignores the
+/// game detection and records the screen for as long as it is asked to — and *where*: it goes to a
+/// `Recordings` folder beside the clips, not into a folder per game.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RecordConfig {
+    pub enabled: bool,
+    pub hotkey: String,
+}
+
+impl Default for RecordConfig {
+    fn default() -> Self {
+        RecordConfig {
+            enabled: false,
+            hotkey: "Alt+F9".into(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -101,6 +126,7 @@ impl Default for Config {
             game_detection: "auto".into(),
             notify_on_save: true,
             hotkey: "Ctrl+Alt+F12".into(),
+            record: RecordConfig::default(),
             audio: AudioConfig::default(),
             tone_map: "auto".into(),
             segment_dir: None,
@@ -156,6 +182,11 @@ impl Config {
             .unwrap_or_else(|_| std::env::temp_dir())
             .join("Videos")
             .join("Clipper")
+    }
+
+    /// Where recordings go: beside the clips, so the library shows them as one more category.
+    pub fn recordings_dir(&self) -> PathBuf {
+        self.output_dir().join("Recordings")
     }
 
     pub fn segment_dir(&self) -> PathBuf {

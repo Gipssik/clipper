@@ -2029,6 +2029,14 @@ const replayStatusText  = document.getElementById('replay-status-text');
 const replayFrontText   = document.getElementById('replay-front-text');
 const replayFrontGame   = document.getElementById('replay-front-game');
 const replayFrontNot    = document.getElementById('replay-front-notgame');
+const recordSwitch      = document.getElementById('record-switch');
+const recordHotkeyValue = document.getElementById('record-hotkey-value');
+const recordHotkeyBtn   = document.getElementById('record-hotkey-btn');
+const recordHotkeyWarn  = document.getElementById('record-hotkey-warn');
+const recordStatus      = document.getElementById('record-status');
+const recordStatusText  = document.getElementById('record-status-text');
+const recBtn            = document.getElementById('rec-btn');
+const recBtnText        = document.getElementById('rec-btn-text');
 
 // Two bitrates per tier. `mbps` is what a continuously busy game costs, because that is what the
 // buffer has to be sized for — a football match spends the peak allowance from start to finish, so
@@ -2074,8 +2082,17 @@ function applyReplayUi() {
   if (!replayConfig) return;
   const c = replayConfig;
 
+  const record = c.record || {};
   replaySwitch.classList.toggle('on', c.enabled);
-  replayOptions.classList.toggle('off', !c.enabled);
+  recordSwitch.classList.toggle('on', !!record.enabled);
+  // The shared settings stay live while either feature is on; the ones that belong to only one
+  // fade with its switch.
+  replayOptions.classList.toggle('off', !captureWanted(c));
+  replayOptions.querySelectorAll('.for-replay').forEach(el => el.classList.toggle('off', !c.enabled));
+  replayOptions.querySelectorAll('.for-record').forEach(el => el.classList.toggle('off', !record.enabled));
+  document.body.classList.toggle('record-ready', !!record.enabled);
+  recordHotkeyValue.textContent = record.hotkey || '';
+  renderRecording();
 
   replayBufferSlider.value = c.bufferSeconds;
   replayBufferValue.textContent = formatReplayDuration(c.bufferSeconds);
@@ -2190,13 +2207,18 @@ async function refreshReplayMics() {
 
 navigator.mediaDevices?.addEventListener('devicechange', () => refreshReplayMics());
 
+// Either feature keeps the recorder running — the same rule as captureWanted() in main.js.
+function captureWanted(c) {
+  return !!(c && (c.enabled || (c.record && c.record.enabled)));
+}
+
 async function patchReplay(patch) {
   replayConfig = await api.setCaptureConfig(patch);
   applyReplayUi();
   // Ask for the truth rather than assume the change took. Anything that rebuilds the pipeline —
   // quality, screen, HDR — takes a moment, and a status line still describing the old one is what
   // "the settings did not apply" feels like from the outside, even when they did.
-  if (replayConfig.enabled) {
+  if (captureWanted(replayConfig)) {
     setReplayStatus('Applying…', false);
     api.captureStatus();
   }
@@ -2356,17 +2378,86 @@ function buildReplayMonitors(monitors) {
 // the setting reads back exactly as chosen and simply never fires.
 let replayHotkeyOk = true;
 
+let recordHotkeyOk = true;
+
 function renderHotkeyWarning() {
-  const on = replayConfig && replayConfig.enabled;
-  const show = on && !replayHotkeyOk;
-  replayHotkeyWarn.style.display = show ? '' : 'none';
-  if (!show) return;
-  replayHotkeyWarn.innerHTML =
-    `Windows would not give Clipper <strong>${replayConfig.hotkey}</strong> — another program ` +
-    `already holds it. Overlays are the usual culprit: NVIDIA's takes Alt+F9 and Alt+F10, and ` +
-    `Steam, Discord and Xbox Game Bar each claim a few. Pick a different combination, or turn ` +
-    `that program's own hotkey off.`;
+  const warn = (el, on, ok, combo) => {
+    const show = on && !ok;
+    el.style.display = show ? '' : 'none';
+    if (!show) return;
+    el.innerHTML =
+      `Windows would not give Clipper <strong>${combo}</strong> — another program ` +
+      `already holds it. Overlays are the usual culprit: NVIDIA's takes Alt+F9 and Alt+F10, and ` +
+      `Steam, Discord and Xbox Game Bar each claim a few. Pick a different combination, or turn ` +
+      `that program's own hotkey off.`;
+  };
+  if (!replayConfig) return;
+  const record = replayConfig.record || {};
+  warn(replayHotkeyWarn, replayConfig.enabled, replayHotkeyOk, replayConfig.hotkey);
+  warn(recordHotkeyWarn, record.enabled, recordHotkeyOk, record.hotkey);
 }
+
+// ── Recording on demand ───────────────────────────────────────────────────────
+// The daemon owns the recording; what lives here is its light. `since` is a local clock anchored
+// on the daemon's own elapsed time whenever a status arrives, so the titlebar can count seconds
+// without asking the daemon once a second.
+const recording = { active: false, waiting: false, since: 0, bytes: 0, finishing: 0 };
+let recTimer = null;
+
+function formatRecordLength(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), sec = total % 60;
+  const pad = (n) => String(n).padStart(2, '0');
+  return h ? `${h}:${pad(m)}:${pad(sec)}` : `${m}:${pad(sec)}`;
+}
+
+function renderRecording() {
+  const record = (replayConfig && replayConfig.record) || {};
+  const hotkey = record.hotkey || '';
+  const length = formatRecordLength(Date.now() - recording.since);
+
+  recBtn.classList.toggle('live', recording.active);
+  recBtnText.textContent = recording.active
+    ? (recording.waiting ? 'Starting…' : length)
+    : recording.finishing ? 'Saving…' : 'Record';
+  recBtn.title = recording.active
+    ? `Stop recording (${hotkey})`
+    : `Start recording (${hotkey}) — the whole screen, into Recordings`;
+
+  recordStatus.style.display = record.enabled ? '' : 'none';
+  if (!record.enabled) return;
+  recordStatus.classList.toggle('live', recording.active && !recording.waiting);
+  recordStatus.classList.toggle('warn', recording.active && recording.waiting);
+  const mb = recording.bytes ? ` · ${Math.round(recording.bytes / 1e6)} MB` : '';
+  recordStatusText.textContent = recording.active
+    ? (recording.waiting ? 'Recording asked for — waiting for the screen to start' : `Recording ${length}${mb}`)
+    : recording.finishing ? 'Finishing the recording…'
+    : `Ready to record — press ${hotkey}`;
+}
+
+// One tick a second while a recording runs and somebody can see it; nothing otherwise. Until the
+// first frame is in the file the tick also asks the daemon, since "Starting…" is only true for
+// the second or so it takes the encoder to come up, and nothing else would say when it is over.
+function recordTick() {
+  if (recording.waiting) api.captureStatus();
+  renderRecording();
+}
+
+function syncRecordTimer() {
+  const want = recording.active && !document.body.classList.contains('asleep');
+  if (want && !recTimer) recTimer = setInterval(recordTick, 1000);
+  if (!want && recTimer) { clearInterval(recTimer); recTimer = null; }
+}
+
+function setRecording(next) {
+  Object.assign(recording, next);
+  renderRecording();
+  syncRecordTimer();
+}
+
+recBtn.addEventListener('click', () => api.captureRecord(!recording.active));
+recordSwitch.addEventListener('click', () =>
+  patchReplay({ record: { ...(replayConfig.record || {}), enabled: !(replayConfig.record && replayConfig.record.enabled) } }));
 
 function setReplayStatus(text, live, warn) {
   replayStatusText.textContent = text;
@@ -2495,19 +2586,42 @@ replayPathBtn.addEventListener('click', async () => {
 // Alt+F-key combinations, which is the best this side can do.
 let replayListening = false;
 let hotkeyFromDaemon = false;
+// Which field the combination is for. One capture at a time: the daemon has one hook.
+let hotkeyTarget = 'replay';
 
-function setHotkeyListening(on) {
+function setHotkeyListening(on, target) {
   replayListening = on;
-  replayHotkeyBtn.classList.toggle('listening', on);
-  replayHotkeyBtn.textContent = on ? 'Press keys…' : 'Change';
+  if (target) hotkeyTarget = target;
+  for (const [btn, name] of [[replayHotkeyBtn, 'replay'], [recordHotkeyBtn, 'record']]) {
+    const mine = on && hotkeyTarget === name;
+    btn.classList.toggle('listening', mine);
+    btn.textContent = mine ? 'Press keys…' : 'Change';
+  }
   if (!on) hotkeyFromDaemon = false;
 }
 
-replayHotkeyBtn.addEventListener('click', async () => {
-  if (replayListening) { setHotkeyListening(false); return; }
-  setHotkeyListening(true);
+// Windows registers a combination once per process too, so the two features cannot share one.
+// Saying so here is better than letting the second registration fail and the warning under it
+// blame "another program".
+function applyHotkey(spec) {
+  const record = replayConfig.record || {};
+  const other = hotkeyTarget === 'record' ? replayConfig.hotkey : record.hotkey;
+  if (other && spec.toLowerCase() === other.toLowerCase()) {
+    showToast(`${spec} is already the ${hotkeyTarget === 'record' ? 'replay' : 'recording'} hotkey`, 'error', 4000);
+    return;
+  }
+  if (hotkeyTarget === 'record') patchReplay({ record: { ...record, hotkey: spec } });
+  else patchReplay({ hotkey: spec });
+}
+
+async function listenFor(target) {
+  if (replayListening) { const same = hotkeyTarget === target; setHotkeyListening(false); if (same) return; }
+  setHotkeyListening(true, target);
   hotkeyFromDaemon = !!(await api.captureListenHotkey());
-});
+}
+
+replayHotkeyBtn.addEventListener('click', () => listenFor('replay'));
+recordHotkeyBtn.addEventListener('click', () => listenFor('record'));
 
 window.addEventListener('keydown', (e) => {
   if (!replayListening) return;
@@ -2531,15 +2645,17 @@ window.addEventListener('keydown', (e) => {
   parts.push(e.key === ' ' ? 'Space' : e.key.length === 1 ? e.key.toUpperCase() : e.key);
 
   setHotkeyListening(false);
-  patchReplay({ hotkey: parts.join('+') });
+  applyHotkey(parts.join('+'));
 }, true);
 
 let replayMonitors = [];
 
 async function initReplay() {
   if (!(await api.captureAvailable())) {
-    replaySwitch.style.pointerEvents = 'none';
-    replaySwitch.style.opacity = '0.3';
+    for (const sw of [replaySwitch, recordSwitch]) {
+      sw.style.pointerEvents = 'none';
+      sw.style.opacity = '0.3';
+    }
     setReplayStatus('Recorder not installed — build capture/ with cargo build --release', false);
     replayConfig = await api.captureConfig();
     return;
@@ -2553,12 +2669,27 @@ async function initReplay() {
   api.captureStatus();
 }
 
+// The status line for the replay is only about the replay; a recording has its own line.
+function replayIdleText(event) {
+  if (event.enabled) return `Waiting for a game — ${event.foreground || 'nothing'} is in front`;
+  return captureWanted(replayConfig) ? 'Instant replay is off' : 'Not running';
+}
+
 api.onCaptureEvent((event) => {
   switch (event.event) {
     case 'status':
       setReplayCapturing(event.recording);
       replayHotkeyOk = event.hotkeyOk !== false;
+      recordHotkeyOk = event.recordHotkeyOk !== false;
       renderHotkeyWarning();
+      if (event.record) {
+        setRecording({
+          active: !!event.record.active,
+          waiting: !!event.record.waiting,
+          since: Date.now() - (event.record.elapsedMs || 0),
+          bytes: event.record.bytes || 0,
+        });
+      }
       replayFront = { process: event.foreground || '', category: event.category || '', isGame: !!event.isGame, recording: !!event.worthRecording, reason: event.reason || '' };
       replayMicState = {
         active: !!event.micActive,
@@ -2570,7 +2701,7 @@ api.onCaptureEvent((event) => {
       renderMicTip();
       renderNoiseWarning(event.noiseError || null);
       renderForeground();
-      if (event.enabled && !event.displayPresent) {
+      if ((event.enabled || recording.active) && !event.displayPresent) {
         setReplayStatus(`Waiting for ${event.monitor} to come back`, false, true);
       } else if (event.recording) {
         const size = event.size ? event.size.width + '×' + event.size.height : '';
@@ -2579,9 +2710,7 @@ api.onCaptureEvent((event) => {
         if (event.fps) bits.push(`${event.fps} fps`);
         setReplayStatus(bits.join(' · '), true);
       } else {
-        setReplayStatus(event.enabled
-          ? `Waiting for a game — ${event.foreground || 'nothing'} is in front`
-          : 'Not running', false);
+        setReplayStatus(replayIdleText(event), false);
       }
       break;
     case 'state':
@@ -2600,9 +2729,10 @@ api.onCaptureEvent((event) => {
       refreshReplayMonitors();
       break;
     case 'exited':
-      if (replayConfig && replayConfig.enabled) {
+      if (captureWanted(replayConfig)) {
         setReplayStatus('The recorder stopped unexpectedly — turn instant replay off and on to restart it. Details are in %LOCALAPPDATA%\clipper\capture.log', false, true);
       }
+      setRecording({ active: false, waiting: false });
       break;
     case 'display':
       refreshReplayMonitors();
@@ -2626,16 +2756,39 @@ api.onCaptureEvent((event) => {
       showToast(`✓ Replay saved — ${Math.round(event.durationMs / 1000)}s`, 'success');
       scanAndRender();
       break;
+    case 'record-started':
+      // A split after a rebuild starts a new file mid-recording; the clock keeps running.
+      if (!recording.active) setRecording({ active: true, waiting: true, since: Date.now(), bytes: 0 });
+      api.captureStatus();
+      break;
+    case 'record-stopped':
+      // A file ending because the recording rolled over into a new one is not a stop, and the
+      // clock must not reset under it; its record-saved still arrives and balances the count.
+      if (event.path) recording.finishing++;
+      if (!event.continuing) setRecording({ active: false, waiting: false });
+      break;
+    case 'record-saved':
+      recording.finishing = Math.max(0, recording.finishing - 1);
+      renderRecording();
+      showToast(`✓ Recording saved — ${formatRecordLength(event.durationMs || 0)}`, 'success');
+      scanAndRender();
+      break;
     case 'hotkey-captured':
       if (!replayListening) break;
       setHotkeyListening(false);
       // A null spec is Escape, or fifteen seconds of nothing. Either way, no change.
-      if (event.spec) patchReplay({ hotkey: event.spec });
+      if (event.spec) applyHotkey(event.spec);
       break;
     case 'error':
       // Hotkey trouble has a permanent home under the field now; a toast that says it too, and
       // then vanishes, is just noise on top.
       if (String(event.message || '').startsWith('hotkey:')) break;
+      if (/^recording/.test(String(event.message || ''))) {
+        recording.finishing = 0;
+        renderRecording();
+        showToast('Recording: ' + String(event.message).replace(/^recording( stopped)?: /, ''), 'error', 6000);
+        break;
+      }
       showToast('Replay: ' + event.message, 'error', 4000);
       break;
   }
@@ -2643,7 +2796,7 @@ api.onCaptureEvent((event) => {
 
 // Keep the status line honest while the panel is open, without polling when it is not.
 setInterval(() => {
-  if (settingsOverlay.classList.contains('open') && replayConfig && replayConfig.enabled) {
+  if (settingsOverlay.classList.contains('open') && captureWanted(replayConfig)) {
     api.captureStatus();
   }
 }, 2000);
@@ -2661,7 +2814,8 @@ initReplay();
 // for real — while keeping the thumbnail cache and making the way back instant.
 api.onWindowAwake((awake) => {
   document.body.classList.toggle('asleep', !awake);
-  if (awake) return;
+  syncRecordTimer();
+  if (awake) { renderRecording(); return; }
   // Both of these keep a video decoder busy for nobody.
   stopHoverPreview();
   if (previewVideo && !previewVideo.paused) previewVideo.pause();

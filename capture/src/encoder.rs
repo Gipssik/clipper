@@ -306,6 +306,19 @@ impl Encoder {
         Ok(true)
     }
 
+    /// Asks for the next frame submitted to be an IDR.
+    ///
+    /// A recording can only start on a keyframe, and the stream carries one every two seconds, so
+    /// without this a recording started while the replay is already running would begin up to two
+    /// seconds after the hotkey — the wrong direction to be late in. False when the transform does
+    /// not take the request, in which case the recording starts on the next natural keyframe.
+    pub fn force_keyframe(&mut self) -> bool {
+        let Ok(codec) = self.transform.cast::<ICodecAPI>() else {
+            return false;
+        };
+        unsafe { codec.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &VARIANT::from(1u32)) }.is_ok()
+    }
+
     /// Everything the encoder has finished since the last call.
     pub fn take(&mut self) -> Vec<Packet> {
         if self.events.is_some() {

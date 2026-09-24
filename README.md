@@ -17,7 +17,7 @@ Clipper does two things. It is a **library** for the folder your game clips land
 thumbnails with quality badges, a trimmer that is lossless and instant, and one-click routes to the
 shapes you actually send people. And it is an **instant replay recorder** that keeps the last stretch
 of your screen buffered in the background, so the moment you did not know you wanted is still there
-when you press the hotkey.
+when you press the hotkey — and records from one press to the next when you do know.
 
 Nothing here phones home, there is no account, and no clip leaves your disk unless you move it.
 
@@ -33,6 +33,7 @@ Nothing here phones home, there is no account, and no clip leaves your disk unle
 - [Converting HDR → SDR](#converting-hdr--sdr)
 - [Export preset](#export-preset)
 - [Instant replay](#instant-replay)
+  - [Recording on demand](#recording-on-demand)
 - [Settings](#settings)
 - [Notes](#notes)
 - [License](#license)
@@ -258,7 +259,7 @@ game goes to one shared **Desktop** folder rather than getting a folder of its o
 | **When to record** | Only in games, or always. |
 | **Desktop audio** | Everything you can hear. About 24 KB/s. |
 | **Microphone** | Mixed into the *same* track as the game, with an optional boost for when Windows' own level runs out at 100%. One track, because most places you post a clip play the first one and silently ignore the rest. |
-| **Tell me when a clip is saved** | A silent Windows toast. The hotkey gets pressed while you are looking at a game, where Clipper's own toast is somewhere behind it. |
+| **Tell me when a clip is saved or a recording starts** | A silent Windows toast. The hotkey gets pressed while you are looking at a game, where Clipper's own toast is somewhere behind it. A recording announces its start too, because the hotkey toggles and nothing else over a game says which way it went. |
 
 **It stays up.** A display switched to HDR, a monitor turned off to spare an OLED, a resolution
 change, a driver hiccup — none of those is an error worth quitting on. Each one rebuilds the pipeline
@@ -281,6 +282,31 @@ Discord and Xbox Game Bar each claim a few more.
 > one whose anti-cheat runs elevated, will swallow the combination silently. Running Clipper as
 > administrator too is the only way around it.
 
+### Recording on demand
+
+Turn on **Record on demand** and a second hotkey — `Alt+F9` by default, ShadowPlay's own — records
+everything from one press to the next. The recording lands in a **Recordings** folder inside your
+clips folder, which the grid shows as a category of its own. The **Record** button in the titlebar
+does the same thing and counts the time while it runs.
+
+**It is the replay's own stream, written twice.** The recorder already encodes your screen once for
+the buffer; a recording takes a copy of those same packets on their way to it. So it costs no GPU at
+all beyond what the replay already spends, it is at exactly the replay's quality, screen and audio
+mix without a second set of settings to keep in step, and **the replay hotkey keeps working in the
+middle of a recording** — press it an hour in and you still get the last minute as a clip.
+
+It records the screen, not the game. *Only in games* and the folder-per-game sorting belong to the
+replay; a recording you started runs until you stop it, whatever is in front. With replay off, the
+recorder sits idle until you press the hotkey, and the first second goes to starting the encoder.
+
+**Nothing is lost if something goes wrong.** While it runs, a recording is a `.ts` stream that is
+valid up to its last byte; stopping copies it into an MP4 — no re-encode, so it takes about as long
+as copying the file. If the recorder is killed or the machine loses power mid-recording, the next
+start finishes the file it left. A display switched to HDR or turned off for a moment does not end
+the recording either: it waits for the screen, then carries on in the same file with the gap closed.
+Only a change the file cannot carry — a different resolution, audio switched on or off — starts a
+new one.
+
 ---
 
 ## Settings
@@ -297,9 +323,9 @@ The **⚙** button in the titlebar. Everything saves as you change it.
 | **Thumbnail frame** | Which second of each clip to grab its still from. Bump it up if your clips open on a black intro or a loading screen. |
 | **Start with Windows** | Launches Clipper when you sign in, straight to the tray — no window. Worth it with instant replay on, since the buffer only reaches back as far as the recorder has been running. |
 
-### Instant replay
+### Replay & recording
 
-All of the above — see [Instant replay](#instant-replay).
+All of the above — see [Instant replay](#instant-replay) and [Recording on demand](#recording-on-demand).
 
 ### Encoding
 
@@ -317,7 +343,7 @@ All of the above — see [Instant replay](#instant-replay).
   `.flv`, `.m4v`, `.mts`, `.m2ts`.
 - **Closing the window does not stop the recorder.** That is the entire point of a replay buffer. The
   tray icon is the way back, and **Quit Clipper** in its menu is how you actually stop everything.
-  With instant replay off, closing the window quits normally.
+  With instant replay and recording on demand both off, closing the window quits normally.
 - **Closed to the tray, the window costs nothing.** It is hidden rather than thrown away, so reopening
   is instant and your thumbnails are still there — but it stops drawing entirely while it is out of
   sight, and a clip left playing is paused. Measured at 0% of the GPU, the same as if it were not

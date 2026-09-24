@@ -16,6 +16,16 @@ use windows::Win32::System::Threading::{
 
 const MUTEX_NAME: &str = "Local\\clipper-capture-singleton";
 
+/// `CLIPPER_CAPTURE_INSTANCE` gives the mutex and the pipe a suffix, so a test harness can run a
+/// second daemon beside the one a real Clipper already has — which otherwise holds both names and
+/// makes the test's daemon exit on the spot. Unset, the names are the plain ones.
+pub fn instance_name(base: &str) -> String {
+    match std::env::var("CLIPPER_CAPTURE_INSTANCE") {
+        Ok(suffix) if !suffix.is_empty() => format!("{base}-{suffix}"),
+        _ => base.to_string(),
+    }
+}
+
 /// Keeps the handle alive for the life of the process; dropping it would release the mutex.
 pub struct Singleton(HANDLE);
 
@@ -31,7 +41,7 @@ impl Drop for Singleton {
 /// segment directory and double the cost for nothing.
 pub fn single_instance() -> Option<Singleton> {
     unsafe {
-        let handle = CreateMutexW(None, true, &HSTRING::from(MUTEX_NAME)).ok()?;
+        let handle = CreateMutexW(None, true, &HSTRING::from(instance_name(MUTEX_NAME))).ok()?;
         if windows::Win32::Foundation::GetLastError() == ERROR_ALREADY_EXISTS {
             let _ = CloseHandle(handle);
             return None;

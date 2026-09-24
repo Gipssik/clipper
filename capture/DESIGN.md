@@ -32,6 +32,8 @@ Windows.Graphics.Capture ──► D3D11 texture (FP16 scRGB or BGRA, stays on t
                                   │   (oldest evicted once the window is full)
                                   │
               [Ctrl+Alt+F12] ─► pin segments ─► byte-concat ─► ffmpeg -c copy ─► clip.mp4
+                                  │
+                    [Alt+F9] ─► the same packets, teed ─► Recordings\rec_….ts ─► -c copy ─► rec_….mp4
 ```
 
 The saved clip lands in the clips folder the app already scans, so `folder:watch` and `syncGrid()`
@@ -357,7 +359,46 @@ and `Game - Level 3` in play would file one session into two folders, and a fold
 worse than a folder that is ugly.
 
 **The hotkey lives in the daemon**, not in Electron's `globalShortcut` — the daemon is the thing
-that is always running. Default `Ctrl+Alt+F12`, configurable.
+that is always running. Default `Ctrl+Alt+F12`, configurable. Each hotkey is registered only while
+its feature is on, and both arrive on the record loop's one message queue, so `hotkey::fired()` drains
+them together — a `PM_REMOVE` peek for one id would throw the other's message away.
+
+**Recording on demand is a second reader of the same stream, not a second recorder.** A second
+hotkey (`Alt+F9`, ShadowPlay's own) records from one press to the next. `record.rs` takes a copy of
+every packet on its way to the ring, so a recording costs no encode silicon, is at the replay's
+quality, tone map and audio mix by construction, and leaves the ring untouched — the replay hotkey
+works in the middle of a recording because nothing about the replay has changed. Running a second
+encoder was the alternative and would have doubled the one cost this whole design exists to keep
+down.
+
+What the recording does *not* share is the replay's idea of when and where. It records the screen
+for as long as it was asked to, whatever is in front: the pipeline's condition to exist is
+`replay_wants || record_wanted`, and game detection only feeds the first. And it goes to
+`<outputPath>\Recordings\`, not a folder per game. With replay off the ring is simply absent —
+`Pipeline::ring` is an `Option` — and the pipeline exists only while a recording does. Switching
+replay on or off under a running recording adds or drops the ring without rebuilding anything.
+
+* **It starts on the keypress, not on the next keyframe.** A recording can only open on an IDR, and
+  the stream has one every two seconds. `Encoder::force_keyframe` (`CODECAPI_AVEncVideoForceKeyFrame`)
+  asks for one on the next frame. Measured with the replay already running: **6.03 s recorded for a
+  6 s request**, where waiting would have lost up to two. With replay off the pipeline has to be
+  built first, and that costs about **0.8 s** at the head.
+* **Written as TS, published as MP4.** While it runs it is `rec_<time>.ts`, a stream valid up to its
+  last byte, with PAT/PMT repeated at every keyframe so it opens from anywhere. Stopping remuxes it
+  (`-c copy`) to `.mp4.part` and renames that into place, so the library never lists a half-written
+  MP4; Clipper's scan does not list `.ts` at all, and the folder watcher ignores `.ts`/`.part` changes
+  so a growing recording does not hold the rescan's debounce off. `record::recover` finishes any
+  `rec_*.ts` a previous run left, at startup. Measured: a recorder killed with `SIGKILL` nine seconds
+  in left a 1.1 MB `.ts`, and the next start published a clean 6.6 s MP4 from it.
+* **It survives a rebuild in one file.** A rebuild *detaches* the recording; the next pipeline's
+  first keyframe is placed one frame after the last one written, so the file closes the gap rather
+  than holding a frozen frame across it. Only a change the file cannot carry — a new resolution, audio
+  appearing or disappearing, compared as `record::Format` — ends it and starts `…_2.mp4`. Measured
+  through a watchdog rebuild: 941 frames over 15.7 s at 60 fps with no gap in the video, and one
+  18 ms splice in the audio where the new pipeline's audio begins just after its keyframe.
+* **A recording that cannot write stops, and keeps what it has.** A write error — a full disk — is
+  kept on the recording rather than propagated, because it is no reason for the pipeline feeding the
+  replay to fail; the loop sees it, publishes what was written and says why.
 
 ## Configuration
 
@@ -379,6 +420,10 @@ file, written atomically by Electron (temp + rename), schema owned by the daemon
   "gameDetection": "auto",         // "auto" = the classifier; "fullscreen" = the old rule
   "notifyOnSave": true,            // a Windows toast when a clip lands; read by Electron
   "hotkey": "Ctrl+Alt+F12",
+  "record": {                      // recording on demand; either switch keeps the daemon running
+    "enabled": false,
+    "hotkey": "Alt+F9"
+  },
   "audio": {
     "desktop": true,
     "mic": true,                   // mixed into the same track
@@ -411,6 +456,7 @@ so nudging a slider would cost you the last minute of footage.
 | `reload` | Re-read config without dropping the buffer — bitrate, duration, path, hotkey, record mode |
 | `status` | Recording? fps, buffer seconds held, disk used, last error |
 | `save` | Same as the hotkey, so the UI can offer a button |
+| `record` | Start or stop a recording: `{"on": true}` starts, `false` stops, no `on` toggles as the hotkey does |
 | `quit` | Flush and exit |
 
 `status` carries the counters that make a stall diagnosable in one look rather than by archaeology:
@@ -429,9 +475,18 @@ whether the microphone fell far enough behind to be left out of a round. `clippe
 --mic --wav out.wav` writes the mix **and each leg beside it**, because a fault in a sum cannot be
 attributed to a source by looking at the sum.
 
-Pushed events: `clip-saved` (with the path and the game), `error`, `state` (armed / idle /
-recording), `foreground` (what is in front and what the classifier made of it), `display` (whether
-the configured monitor is there), `rebuilding` (with the reason), `reloaded`. A `reload` is answered
+Pushed events: `clip-saved` (with the path and the game), `error`, `state` (whether the replay is
+buffering), `foreground` (what is in front and what the classifier made of it), `display` (whether
+the configured monitor is there), `rebuilding` (with the reason), `reloaded`, and for recordings
+`record-started`, `record-stopped` (the file is being finished) and `record-saved` (it is in place).
+When a recording rolls over into a new file on a format change, that `record-stopped` carries
+`continuing: true` and the next `record-started` carries `continued: true`, so the app neither shows
+the recording as stopped nor announces a start nobody asked for.
+
+`status` says `recording` for the replay buffer and `capturing` for the pipeline, which differ while
+a recording runs with replay off, plus a `record` object: `active` (asked for), `waiting` (asked
+for, no frame written yet — the display is missing or the encoder is still starting), `elapsedMs`,
+`durationMs`, `bytes`, `path`. `recordHotkeyOk` sits beside `hotkeyOk`. A `reload` is answered
 with a fresh `status` as well, so a control that changed something redraws immediately rather than
 looking stuck until the next poll.
 
@@ -446,7 +501,8 @@ look like they were not applying — see milestone 7.
 
 ## Lifecycle
 
-The daemon starts with the app and stops with it. The app gains a tray icon and keeps running when
+The daemon starts with the app and stops with it, whenever either instant replay or recording on
+demand is on. The app gains a tray icon and keeps running when
 its window is closed, so the buffer survives closing the window.
 
 - Electron spawns the daemon on `app.whenReady`, passing `--parent-pid <pid>`. The daemon opens a
@@ -501,7 +557,7 @@ thing that can go wrong on its own, and most of them own a counter that says whe
 | `config.rs` | `capture.json`, the quality tiers it expands into, and which changes need a rebuild |
 | `ipc.rs` | the named pipe, framing, and the command vocabulary |
 | `clock.rs` | QPC, the fixed-rate ticker, and the 100 ns unit everything else is stamped in |
-| `hotkey.rs` | `RegisterHotKey` and the message loop behind it |
+| `hotkey.rs` | `RegisterHotKey` for both hotkeys, and the message loop behind them |
 
 **Picture**
 
@@ -528,6 +584,7 @@ thing that can go wrong on its own, and most of them own a counter that says whe
 |---|---|
 | `ts.rs` | the MPEG-TS muxer, written here because segments have to concatenate by byte |
 | `ring.rs` | the segment ring, eviction by duration, and turning a span of segments into an MP4 |
+| `record.rs` | recording on demand: a copy of the ring's packets into one growing file, carried across rebuilds, and finished — or recovered — as an MP4 |
 
 **What is in front**
 
@@ -540,6 +597,13 @@ thing that can go wrong on its own, and most of them own a counter that says whe
 `foreground.rs` and `gamename.rs` are split because the questions are: the first is a live
 classification that changes every half second, the second is a one-shot lookup whose answer cannot
 change while the same process holds the foreground.
+
+Two environment variables exist for testing and change nothing when unset.
+`CLIPPER_CAPTURE_INSTANCE` suffixes the single-instance mutex and the pipe name (Electron's
+`CAPTURE_PIPE` reads it too), so a harness can run its own daemon beside a real Clipper's.
+`CLIPPER_KEEP_TS` keeps a recording's `.ts` after it is published, so a timing question about the MP4
+can be told apart from one about the muxer. `--stall-after` wedges only the pipeline running when the
+stall begins; the one the watchdog builds to replace it runs normally, as it would after a real wedge.
 
 `dump.rs` is behind the `dump` feature and has no part in recording — it writes PNGs so the capture
 path can be checked against real pixels.
@@ -989,5 +1053,11 @@ were still in place after the actual causes had been found and corrected.
   the classifier falls back to the old full-screen rule and says so in `status`.
 - **The hotkey works** (confirmed by hand), but not yet against an elevated game, which is the
   case Windows will not deliver.
+- **Quitting Clipper mid-recording can leave the MP4 for the next start.** The daemon finishes the
+  recording on `quit`, but Electron kills it two seconds later and the parent watcher ends it the
+  moment Clipper exits; a long recording's remux takes longer than that. The `.ts` is complete, and
+  `record::recover` publishes it the next time the daemon starts.
+- **A recording started with replay off loses its first ~0.8 s** to building the pipeline. With
+  replay on it starts on the keypress.
 - **Raw `.h264` carries no frame rate**, so ffmpeg guesses 25 fps when probing the milestone-2
   output. Nothing is wrong with the stream; timing arrives with the muxer.

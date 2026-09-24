@@ -133,6 +133,11 @@ daemon alive (`captureWanted()` in both `main.js` and `renderer.js`), and the pa
 settings stay live while either is on — `.for-replay` / `.for-record` fade with their own switch.
 Do not reach for a second encoder; see "Recording on demand" in `capture/DESIGN.md`.
 
+**Only the alternative binds take controller buttons.** `altHotkey` and `record.altHotkey` are a key
+combination or `Name / Button N [VID:PID]`; `gamepad.rs` reads wheels and button boxes through Raw
+Input, and runs only while such a bind exists or the panel is capturing one — a force-feedback base
+reports ~900 times a second. `clipper-capture pads --watch 30` shows what a device sends.
+
 `parse()` and `key_name()` in `hotkey.rs` are inverses over a shared `NAMED` table and there is a
 test that says so; a key the daemon can capture must be one it can register.
 

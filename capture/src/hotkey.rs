@@ -9,6 +9,7 @@
 //! low-level keyboard hook has exactly the same restriction. The only real fix is running the
 //! daemon elevated too.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -28,6 +29,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 /// own: a `PM_REMOVE` for one would throw the other's message away.
 pub const SAVE: i32 = 1;
 pub const RECORD: i32 = 2;
+/// The alternative binds, when they are key combinations. When they are controller buttons they
+/// never reach this file; see `gamepad.rs`.
+pub const SAVE_ALT: i32 = 3;
+pub const RECORD_ALT: i32 = 4;
 
 pub struct Hotkey {
     id: i32,
@@ -92,6 +97,20 @@ impl Drop for Hotkey {
 
 /// Where the hook leaves its answer. `None` while listening; `Some("")` means cancelled.
 static CAPTURED: Mutex<Option<String>> = Mutex::new(None);
+
+/// True from the moment `listen` is called until it answers. The controller reader reads this to
+/// know that a button going down is an answer to "which button?" rather than a hotkey to act on.
+static LISTENING: AtomicBool = AtomicBool::new(false);
+
+pub fn listening() -> bool {
+    LISTENING.load(Ordering::SeqCst)
+}
+
+/// An answer from somewhere other than the keyboard hook — a controller button. First writer
+/// wins, the same as for a key, so whichever the user pressed first is the one that is kept.
+pub fn offer(answer: String) {
+    finish(answer);
+}
 
 fn is_modifier(vk: u32) -> bool {
     // Both the generic and the side-specific codes; a hook reports the latter.
@@ -187,10 +206,14 @@ pub fn listen<F>(timeout: Duration, done: F)
 where
     F: FnOnce(Option<String>) + Send + 'static,
 {
+    // Cleared before the thread starts, so an answer left over from an earlier capture cannot be
+    // taken as this one's, and set here rather than in the thread so the daemon's next loop already
+    // sees it.
+    if let Ok(mut slot) = CAPTURED.lock() {
+        *slot = None;
+    }
+    LISTENING.store(true, Ordering::SeqCst);
     std::thread::spawn(move || unsafe {
-        if let Ok(mut slot) = CAPTURED.lock() {
-            *slot = None;
-        }
 
         let hook = match SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) {
             Ok(h) => h,
@@ -220,6 +243,7 @@ where
         };
 
         let _ = UnhookWindowsHookEx(hook);
+        LISTENING.store(false, Ordering::SeqCst);
         // An empty string is the cancel signal; both it and a timeout mean "no change".
         done(answer.filter(|s| !s.is_empty()));
     });

@@ -27,6 +27,11 @@ pub struct Config {
     /// it lives here because it is a property of the recorder, not of the library window.
     pub notify_on_save: bool,
     pub hotkey: String,
+    /// A second way to save a replay: a key combination, or a button on a game controller written
+    /// as `Name / Control [VID:PID]` (see `gamepad::Bind`). Empty for none. Only the alternative
+    /// binds take controller buttons — the primary hotkey stays a key, so there is always one bind
+    /// that works with nothing plugged in.
+    pub alt_hotkey: String,
     /// Recording on demand. Independent of `enabled`: either one keeps the daemon running.
     pub record: RecordConfig,
     pub audio: AudioConfig,
@@ -63,6 +68,8 @@ pub struct MonitorSelection {
 pub struct RecordConfig {
     pub enabled: bool,
     pub hotkey: String,
+    /// As `Config::alt_hotkey`, for starting and stopping a recording.
+    pub alt_hotkey: String,
 }
 
 impl Default for RecordConfig {
@@ -70,6 +77,7 @@ impl Default for RecordConfig {
         RecordConfig {
             enabled: false,
             hotkey: "Alt+F9".into(),
+            alt_hotkey: String::new(),
         }
     }
 }
@@ -126,6 +134,7 @@ impl Default for Config {
             game_detection: "auto".into(),
             notify_on_save: true,
             hotkey: "Ctrl+Alt+F12".into(),
+            alt_hotkey: String::new(),
             record: RecordConfig::default(),
             audio: AudioConfig::default(),
             tone_map: "auto".into(),

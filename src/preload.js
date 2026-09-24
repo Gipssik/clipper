@@ -25,7 +25,7 @@ contextBridge.exposeInMainWorld('api', {
   captureStatus:    ()        => ipcRenderer.invoke('capture:status'),
   captureSave:      ()        => ipcRenderer.invoke('capture:save'),
   captureRecord:    (on)      => ipcRenderer.invoke('capture:record', on),
-  captureListenHotkey: ()     => ipcRenderer.invoke('capture:listenHotkey'),
+  captureListenHotkey: (pads) => ipcRenderer.invoke('capture:listenHotkey', pads),
   captureMonitors:  ()        => ipcRenderer.invoke('capture:monitors'),
   captureInputs:    ()        => ipcRenderer.invoke('capture:inputs'),
   captureAvailable: ()        => ipcRenderer.invoke('capture:available'),

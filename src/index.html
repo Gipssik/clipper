@@ -607,6 +607,8 @@
   }
   #replay-mictest-text { position: relative; }
   .replay-row { display: flex; gap: 8px; align-items: center; }
+  .enc-label.alt-label { margin-top: 12px; }
+  .replay-row button:disabled { opacity: 0.4; pointer-events: none; }
   .replay-row .replay-value {
     flex: 1 1 auto; min-width: 0; padding: 9px 12px;
     background: var(--surface2); border: 1px solid var(--border2); border-radius: 6px;
@@ -1272,6 +1274,14 @@
               </div>
               <div class="enc-tip">Saves the buffer wherever you are. A game running as administrator will swallow it — Windows does not deliver hotkeys down to ordinary programs — and there is no way around that but running Clipper as administrator too.</div>
               <div class="enc-warn" id="replay-hotkey-warn" style="display:none"></div>
+              <div class="enc-label alt-label"><span>Alternative</span></div>
+              <div class="replay-row">
+                <span class="replay-value" id="replay-alt-value" style="direction:ltr">None</span>
+                <button id="replay-alt-btn">Change</button>
+                <button id="replay-alt-clear">Clear</button>
+              </div>
+              <div class="enc-tip">A second way to save the replay &mdash; another key combination, or a button on a wheel, button box or controller, so it is where your hands already are. Press <b>Change</b>, then the button. Costs nothing with a key; with a controller, a background reader that wakes sixty times a second — measured at a third of a percent of one CPU core with a force-feedback wheel base, which reports hundreds of times a second even sitting still.</div>
+              <div class="enc-warn" id="replay-alt-warn" style="display:none"></div>
             </div>
 
             <div class="enc-field for-record">
@@ -1282,6 +1292,14 @@
               </div>
               <div class="enc-tip">Press once to start, again to stop. When you stop, the stream is copied into an MP4 rather than re-encoded, so finishing takes about as long as copying the file, and it lands in the grid on its own. The same administrator caveat as the replay hotkey applies.</div>
               <div class="enc-warn" id="record-hotkey-warn" style="display:none"></div>
+              <div class="enc-label alt-label"><span>Alternative</span></div>
+              <div class="replay-row">
+                <span class="replay-value" id="record-alt-value" style="direction:ltr">None</span>
+                <button id="record-alt-btn">Change</button>
+                <button id="record-alt-clear">Clear</button>
+              </div>
+              <div class="enc-tip">A second way to start and stop a recording &mdash; a key combination, or a button on your wheel or controller, the same way as the replay&rsquo;s.</div>
+              <div class="enc-warn" id="record-alt-warn" style="display:none"></div>
             </div>
 
             <div class="enc-field">

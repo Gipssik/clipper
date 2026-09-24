@@ -45,8 +45,9 @@ pub enum Command {
     Record(Option<bool>),
     Reload,
     Quit,
-    /// Capture the next combination the user presses and report it back.
-    Listen,
+    /// Capture the next combination the user presses and report it back. `true` also accepts a
+    /// button on a game controller — only the alternative binds may be one.
+    Listen(bool),
     Unknown(String),
 }
 
@@ -214,7 +215,7 @@ fn parse(line: &str) -> Command {
         Some("record") => Command::Record(value.get("on").and_then(|v| v.as_bool())),
         Some("reload") => Command::Reload,
         Some("quit") => Command::Quit,
-        Some("listen") => Command::Listen,
+        Some("listen") => Command::Listen(value.get("pads").and_then(|v| v.as_bool()).unwrap_or(false)),
         other => Command::Unknown(other.unwrap_or("").to_string()),
     }
 }

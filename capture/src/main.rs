@@ -16,6 +16,7 @@ mod clock;
 mod config;
 mod daemon;
 mod foreground;
+mod gamepad;
 mod gamename;
 mod gpuload;
 mod ipc;
@@ -55,6 +56,7 @@ fn run() -> Fallible<()> {
         Some("monitors") => cmd_monitors(),
         Some("names") => cmd_names(),
         Some("inputs") => cmd_inputs(),
+        Some("pads") => cmd_pads(&args[1..]),
         #[cfg(feature = "dump")]
         Some("dump") => cmd_dump(&args[1..]),
         Some("encode") => cmd_encode(&args[1..]),
@@ -74,6 +76,7 @@ fn usage() {
     eprintln!("  monitors                 list displays as JSON");
     eprintln!("  names                    the folder name every game Windows knows would get");
     eprintln!("  inputs                   list microphones as JSON");
+    eprintln!("  pads [--watch <s>]       list game controllers; --watch prints presses for s seconds");
     #[cfg(feature = "dump")]
     {
         eprintln!("  dump [options]           capture at a fixed rate and report what happened\n");
@@ -835,6 +838,34 @@ fn config_from_args(args: &[String]) -> config::Config {
     config.bitrate_override = number(args, "--bitrate", 0);
     config.max_bitrate_override = number(args, "--max-bitrate", 0);
     config
+}
+
+/// Game controllers, and with `--watch` every button that goes down — the same reader the alt binds
+/// use, so what this prints is exactly what a bind can be set to. Also reports how many HID reports
+/// a second the devices send, which is what the reader costs while it runs.
+fn cmd_pads(args: &[String]) -> Fallible<()> {
+    println!("{}", serde_json::to_string_pretty(&gamepad::list())?);
+    let seconds: f64 = number(args, "--watch", 0.0);
+    if seconds <= 0.0 {
+        return Ok(());
+    }
+    let pads = gamepad::Pads::start().ok_or("could not start the controller reader")?;
+    let started = std::time::Instant::now();
+    let mut last = std::time::Instant::now();
+    let mut last_reports = 0u64;
+    while started.elapsed().as_secs_f64() < seconds {
+        for press in pads.poll() {
+            println!("{}", serde_json::json!({ "press": press.spec() }));
+        }
+        if last.elapsed().as_secs_f64() >= 5.0 {
+            let reports = gamepad::REPORTS.load(std::sync::atomic::Ordering::Relaxed);
+            eprintln!("{:.0} reports/s", (reports - last_reports) as f64 / last.elapsed().as_secs_f64());
+            last_reports = reports;
+            last = std::time::Instant::now();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    Ok(())
 }
 
 /// A front end for the same code the daemon runs, so what is tested here is what ships.

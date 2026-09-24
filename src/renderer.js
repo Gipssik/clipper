@@ -2035,6 +2035,14 @@ const recordHotkeyBtn   = document.getElementById('record-hotkey-btn');
 const recordHotkeyWarn  = document.getElementById('record-hotkey-warn');
 const recordStatus      = document.getElementById('record-status');
 const recordStatusText  = document.getElementById('record-status-text');
+const replayAltValue    = document.getElementById('replay-alt-value');
+const replayAltBtn      = document.getElementById('replay-alt-btn');
+const replayAltClear    = document.getElementById('replay-alt-clear');
+const replayAltWarn     = document.getElementById('replay-alt-warn');
+const recordAltValue    = document.getElementById('record-alt-value');
+const recordAltBtn      = document.getElementById('record-alt-btn');
+const recordAltClear    = document.getElementById('record-alt-clear');
+const recordAltWarn     = document.getElementById('record-alt-warn');
 const recBtn            = document.getElementById('rec-btn');
 const recBtnText        = document.getElementById('rec-btn-text');
 
@@ -2092,6 +2100,10 @@ function applyReplayUi() {
   replayOptions.querySelectorAll('.for-record').forEach(el => el.classList.toggle('off', !record.enabled));
   document.body.classList.toggle('record-ready', !!record.enabled);
   recordHotkeyValue.textContent = record.hotkey || '';
+  replayAltValue.textContent = bindLabel(c.altHotkey) || 'None';
+  recordAltValue.textContent = bindLabel(record.altHotkey) || 'None';
+  replayAltClear.disabled = !c.altHotkey;
+  recordAltClear.disabled = !record.altHotkey;
   renderRecording();
 
   replayBufferSlider.value = c.bufferSeconds;
@@ -2379,6 +2391,37 @@ function buildReplayMonitors(monitors) {
 let replayHotkeyOk = true;
 
 let recordHotkeyOk = true;
+// What the daemon last said about the alternative binds: whether a key combination was refused,
+// and which controllers are plugged in right now.
+let altState = { hotkeyOk: true, recordHotkeyOk: true, controllers: null };
+
+// A controller bind is stored as 'MOZA R5 Base / Button 12 [346E:0004]'. The id is what it matches
+// on and means nothing to a person, so the field shows the rest.
+const PAD_ID = /\s*\[([0-9A-F]{4}:[0-9A-F]{4})\]$/i;
+function bindLabel(spec) {
+  return (spec || '').replace(PAD_ID, '');
+}
+function bindDevice(spec) {
+  const m = (spec || '').match(PAD_ID);
+  return m ? m[1].toUpperCase() : null;
+}
+
+// Under an alternative field: a key combination somebody else holds, or a controller that is not
+// plugged in. The second is not an error — it works again the moment the device is back — but it
+// is exactly the thing to know before a race rather than during one.
+function renderAltWarning(el, on, spec, keyOk) {
+  let text = '';
+  const device = bindDevice(spec);
+  if (on && spec && !device && !keyOk) {
+    text = `Windows would not give Clipper <strong>${spec}</strong> — another program already holds it. Pick a different combination.`;
+  } else if (on && device && Array.isArray(altState.controllers)
+    && !altState.controllers.some(p => (p.id || '').toUpperCase() === device)) {
+    const name = bindLabel(spec).split(' / ').slice(0, -1).join(' / ') || 'That controller';
+    text = `<strong>${name}</strong> is not connected. The button works again as soon as it is plugged back in.`;
+  }
+  el.style.display = text ? '' : 'none';
+  el.innerHTML = text;
+}
 
 function renderHotkeyWarning() {
   const warn = (el, on, ok, combo) => {
@@ -2395,6 +2438,8 @@ function renderHotkeyWarning() {
   const record = replayConfig.record || {};
   warn(replayHotkeyWarn, replayConfig.enabled, replayHotkeyOk, replayConfig.hotkey);
   warn(recordHotkeyWarn, record.enabled, recordHotkeyOk, record.hotkey);
+  renderAltWarning(replayAltWarn, replayConfig.enabled, replayConfig.altHotkey, altState.hotkeyOk);
+  renderAltWarning(recordAltWarn, record.enabled, record.altHotkey, altState.recordHotkeyOk);
 }
 
 // ── Recording on demand ───────────────────────────────────────────────────────
@@ -2589,39 +2634,53 @@ let hotkeyFromDaemon = false;
 // Which field the combination is for. One capture at a time: the daemon has one hook.
 let hotkeyTarget = 'replay';
 
+// The four binds, each with the button that changes it, a name for messages, and how to read and
+// write it. Only the alternatives accept a controller button.
+const BINDS = {
+  'replay':     { btn: replayHotkeyBtn, name: 'replay hotkey',
+                  get: (c) => c.hotkey, set: (c, v) => ({ hotkey: v }) },
+  'replay-alt': { btn: replayAltBtn, name: 'alternative replay bind', pads: true,
+                  get: (c) => c.altHotkey, set: (c, v) => ({ altHotkey: v }) },
+  'record':     { btn: recordHotkeyBtn, name: 'recording hotkey',
+                  get: (c) => (c.record || {}).hotkey, set: (c, v) => ({ record: { ...(c.record || {}), hotkey: v } }) },
+  'record-alt': { btn: recordAltBtn, name: 'alternative recording bind', pads: true,
+                  get: (c) => (c.record || {}).altHotkey, set: (c, v) => ({ record: { ...(c.record || {}), altHotkey: v } }) },
+};
+
 function setHotkeyListening(on, target) {
   replayListening = on;
   if (target) hotkeyTarget = target;
-  for (const [btn, name] of [[replayHotkeyBtn, 'replay'], [recordHotkeyBtn, 'record']]) {
+  for (const [name, bind] of Object.entries(BINDS)) {
     const mine = on && hotkeyTarget === name;
-    btn.classList.toggle('listening', mine);
-    btn.textContent = mine ? 'Press keys…' : 'Change';
+    bind.btn.classList.toggle('listening', mine);
+    bind.btn.textContent = mine ? (bind.pads ? 'Press a key or button…' : 'Press keys…') : 'Change';
   }
   if (!on) hotkeyFromDaemon = false;
 }
 
-// Windows registers a combination once per process too, so the two features cannot share one.
-// Saying so here is better than letting the second registration fail and the warning under it
-// blame "another program".
+// Windows registers a combination once per process too, and a controller button bound twice would
+// fire both, so no two binds may be the same thing. Saying so here is better than letting the
+// second registration fail and the warning under it blame "another program".
 function applyHotkey(spec) {
-  const record = replayConfig.record || {};
-  const other = hotkeyTarget === 'record' ? replayConfig.hotkey : record.hotkey;
-  if (other && spec.toLowerCase() === other.toLowerCase()) {
-    showToast(`${spec} is already the ${hotkeyTarget === 'record' ? 'replay' : 'recording'} hotkey`, 'error', 4000);
+  const taken = Object.entries(BINDS).find(([name, bind]) =>
+    name !== hotkeyTarget && (bind.get(replayConfig) || '').toLowerCase() === spec.toLowerCase());
+  if (taken) {
+    showToast(`${bindLabel(spec)} is already the ${taken[1].name}`, 'error', 4000);
     return;
   }
-  if (hotkeyTarget === 'record') patchReplay({ record: { ...record, hotkey: spec } });
-  else patchReplay({ hotkey: spec });
+  patchReplay(BINDS[hotkeyTarget].set(replayConfig, spec));
 }
 
 async function listenFor(target) {
   if (replayListening) { const same = hotkeyTarget === target; setHotkeyListening(false); if (same) return; }
   setHotkeyListening(true, target);
-  hotkeyFromDaemon = !!(await api.captureListenHotkey());
+  hotkeyFromDaemon = !!(await api.captureListenHotkey(!!BINDS[target].pads));
 }
 
-replayHotkeyBtn.addEventListener('click', () => listenFor('replay'));
-recordHotkeyBtn.addEventListener('click', () => listenFor('record'));
+for (const name of Object.keys(BINDS)) BINDS[name].btn.addEventListener('click', () => listenFor(name));
+replayAltClear.addEventListener('click', () => patchReplay({ altHotkey: '' }));
+recordAltClear.addEventListener('click', () =>
+  patchReplay({ record: { ...(replayConfig.record || {}), altHotkey: '' } }));
 
 window.addEventListener('keydown', (e) => {
   if (!replayListening) return;
@@ -2681,6 +2740,7 @@ api.onCaptureEvent((event) => {
       setReplayCapturing(event.recording);
       replayHotkeyOk = event.hotkeyOk !== false;
       recordHotkeyOk = event.recordHotkeyOk !== false;
+      if (event.alt) altState = event.alt;
       renderHotkeyWarning();
       if (event.record) {
         setRecording({

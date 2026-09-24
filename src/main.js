@@ -414,9 +414,12 @@ const CAPTURE_DEFAULTS = {
   outputPath: '',
   perGameSubfolder: true,
   hotkey: 'Ctrl+Alt+F12',
+  // A second way to fire each: a key combination, or a button on a wheel or controller written as
+  // 'Name / Control [VID:PID]'. Empty for none. Only these take controller buttons.
+  altHotkey: '',
   // Recording on demand. Its own switch, because it keeps the daemon running with replay off —
   // idle until the hotkey is pressed, but still a process and a registered hotkey.
-  record: { enabled: false, hotkey: 'Alt+F9' },
+  record: { enabled: false, hotkey: 'Alt+F9', altHotkey: '' },
   audio: { desktop: true, mic: true, micDevice: '', micGainDb: 0, noiseSuppression: false, noiseStrength: 70 },
   toneMap: 'auto',
   segmentDir: null,
@@ -792,7 +795,8 @@ ipcMain.handle('capture:record', (_, on) => sendCapture('record', { on: !!on }))
 // itself: Windows consumes Alt+F-key above every layer Electron can reach, so a keydown handler in
 // the panel never sees it. The daemon is a plain Win32 process and can install a low-level hook.
 // Returns false when the daemon is not up, which is the panel's cue to read the key itself.
-ipcMain.handle('capture:listenHotkey', () => sendCapture('listen'));
+// `pads` also accepts a button on a game controller — for the alternative binds only.
+ipcMain.handle('capture:listenHotkey', (_, pads) => sendCapture('listen', { pads: !!pads }));
 ipcMain.handle('capture:available', () => fs.existsSync(getCapturePath()));
 
 // The daemon is the authority on what monitors exist and whether each is in HDR right now, so ask

@@ -25,6 +25,7 @@ use windows::Graphics::DirectX::DirectXPixelFormat;
 use crate::config::Config;
 use crate::ipc::{Command, Control};
 use crate::record::{self, Recording};
+use crate::gamepad::{self, Bind, Pads};
 use crate::{aac, audio, capture, clock, config, convert, d3d, display, encoder, foreground, hotkey, monitors, ring};
 
 /// The timeline starts a second in rather than at zero: a PCR of 0 upsets some players.
@@ -479,8 +480,24 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
         }
         Some(key)
     };
+    // An alternative bind that is a controller button is not a hotkey at all, and is read by the
+    // controller reader instead; only a key combination is registered here.
+    let key_alt = |spec: &str| !spec.trim().is_empty() && !gamepad::is_pad_spec(spec);
     let mut save_key = register(config.enabled, &config.hotkey, hotkey::SAVE);
     let mut record_key = register(config.record.enabled, &config.record.hotkey, hotkey::RECORD);
+    let mut save_alt_key = register(config.enabled && key_alt(&config.alt_hotkey), &config.alt_hotkey, hotkey::SAVE_ALT);
+    let mut record_alt_key = register(
+        config.record.enabled && key_alt(&config.record.alt_hotkey),
+        &config.record.alt_hotkey,
+        hotkey::RECORD_ALT,
+    );
+
+    // The controller reader, while a bind needs it or the panel is asking which button to use. A
+    // wheel base reports hundreds of times a second, so it does not run for nothing.
+    let mut pads: Option<Pads> = None;
+    let mut pads_retry_at = 0.0f64;
+    // The panel asked for a controller button as well as a key, and the capture is still open.
+    let mut pad_listen = false;
 
     let mut watcher = foreground::Watcher::new();
     crate::lifecycle::log(&format!(
@@ -649,9 +666,44 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
         let mut saves_asked = 0u32;
         for id in hotkey::fired() {
             match id {
-                hotkey::SAVE => saves_asked += 1,
-                hotkey::RECORD => toggles += 1,
+                hotkey::SAVE | hotkey::SAVE_ALT => saves_asked += 1,
+                hotkey::RECORD | hotkey::RECORD_ALT => toggles += 1,
                 _ => {}
+            }
+        }
+
+        // ── controller buttons ────────────────────────────────────────────────────
+        if pad_listen && !hotkey::listening() {
+            pad_listen = false;
+        }
+        let save_pad = if config.enabled { Bind::parse(&config.alt_hotkey) } else { None };
+        let record_pad = if config.record.enabled { Bind::parse(&config.record.alt_hotkey) } else { None };
+        let want_pads = pad_listen || save_pad.is_some() || record_pad.is_some();
+        if want_pads && pads.is_none() && elapsed >= pads_retry_at {
+            pads = Pads::start();
+            match &pads {
+                Some(_) => crate::lifecycle::log("controller reader started"),
+                None => pads_retry_at = elapsed + 10.0,
+            }
+        } else if !want_pads && pads.is_some() {
+            pads = None;
+            crate::lifecycle::log("controller reader stopped");
+        }
+        if let Some(reader) = &pads {
+            for press in reader.poll() {
+                // While the panel is asking, a button is the answer, never an action.
+                if pad_listen {
+                    crate::lifecycle::log(&format!("controller button offered: {}", press.spec()));
+                    hotkey::offer(press.spec());
+                    pad_listen = false;
+                    continue;
+                }
+                if save_pad.as_ref().is_some_and(|b| b.matches(&press)) {
+                    saves_asked += 1;
+                }
+                if record_pad.as_ref().is_some_and(|b| b.matches(&press)) {
+                    toggles += 1;
+                }
             }
         }
         if options.record_after > 0.0 && !record_fired && elapsed >= options.record_after {
@@ -687,21 +739,39 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
                     &save_key,
                     &record_key,
                     record_status(record_wanted, record_since, recording.as_ref()),
+                    alt_status(&save_alt_key, &record_alt_key, pads.is_some()),
                 )),
                 Command::Reload => {
                     let Some(path) = &options.config_path else { continue };
                     let next = Config::load(path);
                     let restart = config.needs_restart(&next);
 
-                    // Both at once, whenever either changes: swapping the two combinations over
-                    // would otherwise find the new one still held by the old registration.
-                    if (config.enabled, &config.hotkey, config.record.enabled, &config.record.hotkey)
-                        != (next.enabled, &next.hotkey, next.record.enabled, &next.record.hotkey)
-                    {
+                    // All at once, whenever any changes: swapping two combinations over would
+                    // otherwise find the new one still held by the old registration.
+                    let binds = |c: &Config| {
+                        (
+                            c.enabled,
+                            c.hotkey.clone(),
+                            c.alt_hotkey.clone(),
+                            c.record.enabled,
+                            c.record.hotkey.clone(),
+                            c.record.alt_hotkey.clone(),
+                        )
+                    };
+                    if binds(&config) != binds(&next) {
                         drop(save_key.take());
                         drop(record_key.take());
+                        drop(save_alt_key.take());
+                        drop(record_alt_key.take());
                         save_key = register(next.enabled, &next.hotkey, hotkey::SAVE);
                         record_key = register(next.record.enabled, &next.record.hotkey, hotkey::RECORD);
+                        save_alt_key =
+                            register(next.enabled && key_alt(&next.alt_hotkey), &next.alt_hotkey, hotkey::SAVE_ALT);
+                        record_alt_key = register(
+                            next.record.enabled && key_alt(&next.record.alt_hotkey),
+                            &next.record.alt_hotkey,
+                            hotkey::RECORD_ALT,
+                        );
                     }
                     if restart {
                         retire(pipeline.take(), &mut totals, &mut recording);
@@ -745,12 +815,14 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
                         &save_key,
                         &record_key,
                         record_status(record_wanted, record_since, recording.as_ref()),
+                        alt_status(&save_alt_key, &record_alt_key, pads.is_some()),
                     ));
                 }
                 // The settings panel cannot capture Alt+F-key itself — Windows eats those above
                 // every layer Electron can reach — so it asks the daemon, which can install a
                 // low-level hook. See hotkey.rs.
-                Command::Listen => {
+                Command::Listen(with_pads) => {
+                    pad_listen = with_pads;
                     let reply = emitter.clone();
                     hotkey::listen(std::time::Duration::from_secs(15), move |spec| {
                         if let Some(reply) = reply {
@@ -1149,6 +1221,22 @@ fn recorded(outcome: Result<record::Outcome, String>, emit: &dyn Fn(serde_json::
     }
 }
 
+/// The alternative binds. A key combination can be refused like any hotkey; a controller button
+/// cannot be refused, but its device can be unplugged, which the panel says under the field —
+/// `controllers` is what is connected right now, by the id a bind matches on.
+fn alt_status(
+    save_alt: &Option<windows::core::Result<hotkey::Hotkey>>,
+    record_alt: &Option<windows::core::Result<hotkey::Hotkey>>,
+    reading: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "hotkeyOk": !matches!(save_alt, Some(Err(_))),
+        "recordHotkeyOk": !matches!(record_alt, Some(Err(_))),
+        "reading": reading,
+        "controllers": gamepad::list(),
+    })
+}
+
 /// What the panel and the titlebar need to show a recording: whether one was asked for, whether
 /// it has a picture yet, and how far it has got.
 fn record_status(
@@ -1216,6 +1304,7 @@ fn status(
     save_key: &Option<windows::core::Result<hotkey::Hotkey>>,
     record_key: &Option<windows::core::Result<hotkey::Hotkey>>,
     record: serde_json::Value,
+    alt: serde_json::Value,
 ) -> serde_json::Value {
     let tier = config.tier();
     serde_json::json!({
@@ -1289,5 +1378,8 @@ fn status(
         "recordHotkey": config.record.hotkey,
         "recordHotkeyOk": !matches!(record_key, Some(Err(_))),
         "record": record,
+        "altHotkey": config.alt_hotkey,
+        "recordAltHotkey": config.record.alt_hotkey,
+        "alt": alt,
     })
 }

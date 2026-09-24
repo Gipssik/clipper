@@ -363,6 +363,32 @@ that is always running. Default `Ctrl+Alt+F12`, configurable. Each hotkey is reg
 its feature is on, and both arrive on the record loop's one message queue, so `hotkey::fired()` drains
 them together — a `PM_REMOVE` peek for one id would throw the other's message away.
 
+**Alternative binds can be a controller button.** Each hotkey has an `altHotkey` beside it — a
+second key combination, registered as ids 3 and 4, or a button on a game controller written as
+`MOZA R5 Base / Button 12 [346E:0004]`. The primary binds stay keys, so one always works with
+nothing plugged in. `gamepad.rs` reads controllers through **Raw Input with `RIDEV_INPUTSINK`**, on a
+message-only window in a thread of its own: `Windows.Gaming.Input` would be less code and stops
+reporting while our process is in the background, which is always. Reports are decoded with
+`HidP_GetUsages` (button page) and `HidP_GetUsageValue` (hat switch) against the device's own
+preparsed data, so nothing is specific to any vendor. A bind matches on vendor and product id plus
+the control's name — that survives replugging, where a device path does not.
+
+Three things came out of measuring it against a real wheel base (MOZA R5, 128 buttons and a hat):
+
+* **It reports ~900 times a second while nobody touches it.** Waking per `WM_INPUT` and parsing into
+  strings cost **2.1% of a core**. The reader now sleeps 16 ms and drains the queue, and compares
+  reports as a 256-bit mask so text is only built on a change: **0.31%**. It also runs only while a
+  bind names a controller or the panel is asking which button to use.
+* **A button can be held forever.** The R5 reports one of its buttons as permanently down, which
+  read as a press the moment the reader started. The first report from each device is a baseline,
+  not a press.
+* **Choosing a button goes through the hotkey capture.** `listen` with `pads: true` opens the reader
+  and offers the first button to the same first-writer-wins slot the keyboard hook writes, so a key
+  or a button, whichever comes first, is the answer; while it is open, a button is never an action.
+
+`clipper-capture pads` lists the controllers and `pads --watch <s>` prints every press and the
+report rate — exactly what a bind can be set to, and what the reader costs.
+
 **Recording on demand is a second reader of the same stream, not a second recorder.** A second
 hotkey (`Alt+F9`, ShadowPlay's own) records from one press to the next. `record.rs` takes a copy of
 every packet on its way to the ring, so a recording costs no encode silicon, is at the replay's
@@ -420,9 +446,11 @@ file, written atomically by Electron (temp + rename), schema owned by the daemon
   "gameDetection": "auto",         // "auto" = the classifier; "fullscreen" = the old rule
   "notifyOnSave": true,            // a Windows toast when a clip lands; read by Electron
   "hotkey": "Ctrl+Alt+F12",
+  "altHotkey": "",                 // a key combination or "Name / Button 12 [VID:PID]"; "" for none
   "record": {                      // recording on demand; either switch keeps the daemon running
     "enabled": false,
-    "hotkey": "Alt+F9"
+    "hotkey": "Alt+F9",
+    "altHotkey": ""
   },
   "audio": {
     "desktop": true,
@@ -557,7 +585,8 @@ thing that can go wrong on its own, and most of them own a counter that says whe
 | `config.rs` | `capture.json`, the quality tiers it expands into, and which changes need a rebuild |
 | `ipc.rs` | the named pipe, framing, and the command vocabulary |
 | `clock.rs` | QPC, the fixed-rate ticker, and the 100 ns unit everything else is stamped in |
-| `hotkey.rs` | `RegisterHotKey` for both hotkeys, and the message loop behind them |
+| `hotkey.rs` | `RegisterHotKey` for all four binds, and the message loop behind them |
+| `gamepad.rs` | buttons and hats on game controllers, read through Raw Input for the alternative binds |
 
 **Picture**
 

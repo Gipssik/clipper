@@ -33,6 +33,7 @@ Nothing here phones home, there is no account, and no clip leaves your disk unle
 - [Converting HDR → SDR](#converting-hdr--sdr)
 - [Export preset](#export-preset)
 - [Instant replay](#instant-replay)
+  - [Buttons on your wheel](#buttons-on-your-wheel)
   - [Recording on demand](#recording-on-demand)
 - [Settings](#settings)
 - [Notes](#notes)
@@ -281,6 +282,24 @@ Discord and Xbox Game Bar each claim a few more.
 > ordinary program while something running as administrator has focus. A game launched elevated, or
 > one whose anti-cheat runs elevated, will swallow the combination silently. Running Clipper as
 > administrator too is the only way around it.
+
+### Buttons on your wheel
+
+Each hotkey has an **Alternative** bind underneath it, and that one can be a button on a sim racing
+wheel, a button box, a flight stick or a gamepad — anything Windows calls a game controller — as
+well as a second key combination. Press **Change**, then the button. Your hands are on the wheel
+when the moment happens; reaching for `Ctrl+Alt+F12` mid-corner is not a thing anybody does.
+
+Buttons and the D-pad on the rim both work, read from the device's own description of itself, so it
+is not a list of supported wheels. A bind remembers the device by its make and model, so it still
+works after you unplug the wheel or move it to another port, and the field says so if the device is
+not connected. The main hotkeys stay keyboard-only, so there is always one bind that works with
+nothing plugged in.
+
+It costs nothing until you bind a button. With one bound, a background reader runs: a
+force-feedback wheel base reports its position hundreds of times a second even sitting still, so the
+reader drains those in batches sixty times a second instead of waking for each. Measured with a MOZA
+R5 base: about a third of a percent of one CPU core.
 
 ### Recording on demand
 

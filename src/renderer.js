@@ -1458,6 +1458,7 @@ async function openSettings() {
   if (!encoderList) encoderList = await api.getEncoders();
   buildDefaultEncoderSelect();
   refreshReplayMonitors();
+  refreshReplayMics();
 }
 function closeSettings() {
   settingsOverlay.classList.remove('open');
@@ -2162,6 +2163,32 @@ async function refreshReplayMonitors() {
   buildReplayMonitors(replayMonitors);
   if (replayConfig) applyReplayUi();
 }
+
+// The same goes for microphones, and the default one moves without anything in the list changing,
+// so the label naming it goes stale. The list is taken again when the panel opens, and whenever
+// Chromium reports a device change — it listens to Windows' endpoint notifications, which cover a
+// new default as well as a mic plugged in or pulled out, and costs nothing while nothing changes.
+// Each listing spawns the recorder, so a burst of changes coalesces into at most one more.
+let replayMicsRefreshing = null;
+let replayMicsAgain = false;
+async function refreshReplayMics() {
+  if (replayMicsRefreshing) { replayMicsAgain = true; return replayMicsRefreshing; }
+  replayMicsRefreshing = (async () => {
+    try {
+      do {
+        replayMicsAgain = false;
+        if (!(await api.captureAvailable())) return;
+        buildReplayMics(await api.captureInputs());
+        if (replayConfig) applyReplayUi();
+      } while (replayMicsAgain);
+    } finally {
+      replayMicsRefreshing = null;
+    }
+  })();
+  return replayMicsRefreshing;
+}
+
+navigator.mediaDevices?.addEventListener('devicechange', () => refreshReplayMics());
 
 async function patchReplay(patch) {
   replayConfig = await api.setCaptureConfig(patch);

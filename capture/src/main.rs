@@ -413,13 +413,18 @@ fn cmd_encode(args: &[String]) -> Fallible<()> {
     let started = clock::qpc_now();
     for tick in 0..frames {
         ticker.wait();
-        if cap.pump(&gpu)? {
+        let fresh = cap.pump(&gpu)?;
+        if fresh {
             new_frames += 1;
         }
         let Some(texture) = cap.latest() else { continue };
 
         let t0 = clock::qpc_now();
-        converter.convert(&gpu, texture)?;
+        if fresh {
+            converter.convert(&gpu, texture)?;
+        } else {
+            converter.repeat(&gpu);
+        }
         // Constant frame rate, so the timestamp is the tick's position on the timeline and not
         // whenever this loop happened to get here.
         let pts = tick as i64 * 10_000_000 / fps as i64;

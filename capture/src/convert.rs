@@ -191,6 +191,16 @@ impl Converter {
         (self.width, self.height)
     }
 
+    /// The last conversion again, into the next surface — a plain copy of the finished NV12 rather
+    /// than another pass over the source. A new surface rather than the same one resubmitted: see
+    /// "Repeated frames are copied, not converted" in DESIGN.md.
+    pub fn repeat(&mut self, gpu: &Gpu) {
+        let last = self.nv12().clone();
+        let surface = &self.surfaces[self.next];
+        self.next = (self.next + 1) % SURFACES;
+        unsafe { gpu.context.CopyResource(&surface.nv12, &last) };
+    }
+
     pub fn convert(&mut self, gpu: &Gpu, source: &ID3D11Texture2D) -> Result<()> {
         let srv = self.source_view(gpu, source)?;
         let ctx = &gpu.context;

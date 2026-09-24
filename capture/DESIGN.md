@@ -51,6 +51,39 @@ high-resolution waitable timer ticks at the target fps and encodes whatever the 
 repeating the previous frame when the game is running below target. CFR keeps the muxer and any
 later trim in Clipper trivial; a repeated frame costs almost nothing in the bitstream.
 
+**Repeated frames are copied, not converted.** On a tick with no new frame the scale / tone map /
+NV12 pass used to run again over the same source; now `Converter::repeat` copies the last finished
+NV12 into the next surface instead. Measured on a still screen at `low` quality, RTX 5080, 1440p240,
+two alternating runs each:
+
+| Repeated frame                    | Recorder 3D | Encode | GPU board power |
+| --------------------------------- | ----------- | ------ | --------------- |
+| converted again (v3.2.0)          | 1.46%       | 5.0%   | 24.6 W          |
+| **copy of the last NV12**         | **0.74%**   | 5.0%   | **22.9 W**      |
+| same surface handed over again    | 0.00%       | 16.1%  | 20.7 W          |
+
+The last row is not a typo and is not used. Resubmitting the surface the encoder was just given
+triples the encode engine's reported busy time, and the clock drop (775 → 645 MHz) explains a
+fraction of that; the cause is inside the driver. It draws the least power, but Task Manager is where
+people judge a recorder, and it would show one three times busier. With motion on screen nearly every
+tick has a new frame, so neither saves anything there — measured equal within noise.
+
+**Frames are copied out of the capture pool, and sampling it directly is slower.** It looks like a
+free win to skip `Capture::pump`'s `CopyResource` and let the converter read the pool's texture,
+holding the frame open until a fence says the read is done. It was built, and it came out *worse*
+with motion on screen: recorder 3D 1.12% → 1.49% and DWM 3.6% → 7.4% with a small animated window,
+2.68% → 3.25% scrolling full screen. The likely reason is that pool textures are shared surfaces and
+lose the GPU's framebuffer compression, and the Catmull-Rom downscale reads every source texel
+several times; the copy pays for the shared surface once. Do not rebuild it without measuring this.
+
+**Read GPU percentages together with the clock.** Task Manager's figure is the share of each second
+an engine was busy *at its current clock*. An idle RTX 5080 sits in P8 with memory at 405 MHz of
+15001; the recorder's work there reads as 2–3% 3D and 8–10% encode, and the moment enough is moving
+for the driver to go to P3 the same work reads 1.1% and 4.9%. This is why the recorder's figure
+rises and falls with DWM's under light desktop activity, and why it drops while NVIDIA's own
+Instant Replay runs — which holds the card in P5. Compare builds on a fixed scene (`motion.js`-style
+scrolling window) and read board power next to the percentages.
+
 **Media Foundation, not NVENC directly.** One code path picks up NVENC, AMD AMF or Intel QuickSync
 via `MFTEnumEx(MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER)`
 filtered on `MFVideoFormat_H264`. The MFT is driven async (`MF_TRANSFORM_ASYNC_UNLOCK`, then pump

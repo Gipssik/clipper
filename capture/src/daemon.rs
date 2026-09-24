@@ -300,9 +300,16 @@ impl Pipeline {
     fn tick(&mut self, mut rec: Option<&mut Recording>) -> crate::Fallible<()> {
         let scheduled = self.ticker.wait();
 
-        self.capture.pump(&self.gpu)?;
+        // Converted only when the screen changed; a repeated frame is a copy of the last
+        // conversion. See "Repeated frames are copied, not converted" in DESIGN.md — including why
+        // handing the encoder the same surface twice is not the cheaper option it looks like.
+        let fresh = self.capture.pump(&self.gpu)?;
         if let Some(texture) = self.capture.latest() {
-            self.converter.convert(&self.gpu, texture)?;
+            if fresh {
+                self.converter.convert(&self.gpu, texture)?;
+            } else {
+                self.converter.repeat(&self.gpu);
+            }
             let pts = clock::qpc_to_hns(scheduled, self.freq) - self.epoch_hns;
             self.last_video_pts_hns = pts;
             self.encoder.submit(self.converter.nv12(), pts)?;

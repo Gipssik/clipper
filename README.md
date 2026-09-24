@@ -19,6 +19,8 @@ shapes you actually send people. And it is an **instant replay recorder** that k
 of your screen buffered in the background, so the moment you did not know you wanted is still there
 when you press the hotkey — and records from one press to the next when you do know.
 
+![The library: a grid of clips by game, with 720p60, AV1 and HDR badges, while a recording runs in the titlebar](docs/screenshots/library.jpg)
+
 Nothing here phones home, there is no account, and no clip leaves your disk unless you move it.
 
 ---
@@ -101,6 +103,8 @@ files are going to give somebody trouble.
 - **The folder is watched.** A clip saved by the recorder — or by anything else — shows up without a
   refresh, and a file *rewritten in place* has its card rebuilt: new still, new badges, new size.
 
+![A card's menu: Export with the preset in its label, Show in Explorer, Compress, Delete](docs/screenshots/card-menu.jpg)
+
 The still and the metadata come from a single ffmpeg pass per clip, so the badges cost nothing on top
 of the thumbnail you were getting anyway. Both are lazy, driven by what is actually on screen.
 
@@ -109,6 +113,8 @@ of the thumbnail you were getting anyway. Both are lazy, driven by what is actua
 ## Trimming
 
 Click a clip to open it.
+
+![The trimmer: a clip playing with the in and out handles on the timeline, Save as new and Replace original](docs/screenshots/trim.jpg)
 
 1. Drag the **yellow handles** on the timeline to set the in and out points
 2. **Preview trim** plays just the selection
@@ -139,6 +145,8 @@ bitrate and size in front of you, and gives you:
 - **Framerate**, **audio** (keep / re-encode / strip), and **encoder speed**.
 - **Encoder** — your GPU when it has usable silicon, with CPU x264/x265 always available.
 
+![The Compress window: the source stats, resolution, quality slider, framerate, audio, encoder, and an estimated output size](docs/screenshots/compress.jpg)
+
 Every control carries a one-line note on what moving it does to the picture, and the footer shows a
 live **estimated output size** against the original. The estimate is a model, not a promise — real
 size depends on how much motion the clip has.
@@ -166,6 +174,8 @@ alone does not fix it — the picture has to be converted.
 brightness into SDR range, and re-encodes to H.264 **correctly tagged bt709** so nothing downstream
 second-guesses it. That last part matters: without the re-tag, ffmpeg copies the source's colour tags
 and the result still claims to be HDR.
+
+![Convert HDR to SDR on an HDR10 clip, with the Keep HDR, Balanced, Filmic and Punchy modes](docs/screenshots/hdr.jpg)
 
 | Mode | What it does |
 | --- | --- |
@@ -224,6 +234,8 @@ browsers and editors will not open it.
 
 Resolution is a **cap**, not a target. A 720p clip under a 1080p preset is left alone.
 
+![Settings, Encoding: the default encoder and the export preset](docs/screenshots/settings-encoding.jpg)
+
 ---
 
 ## Instant replay
@@ -232,6 +244,8 @@ Turn on **Record in the background** in Settings and Clipper keeps the last stre
 encoded in a ring buffer. Press the hotkey — `Ctrl+Alt+F12` by default, rebindable — and that stretch
 becomes a clip in your library. The tray icon turns red while the buffer is live, and so does the dot
 in the titlebar mark.
+
+![Settings, Replay & recording: the switches for recording in the background and recording on demand, the buffer length and quality](docs/screenshots/settings-replay.jpg)
 
 It is a native Direct3D 11 recorder, not ffmpeg. Frames are captured, scaled, tone mapped and packed
 to NV12 in **one GPU pass**, then encoded by your card's dedicated encode silicon through Media
@@ -262,6 +276,8 @@ game goes to one shared **Desktop** folder rather than getting a folder of its o
 | **Microphone** | Mixed into the *same* track as the game, with an optional boost for when Windows' own level runs out at 100%. One track, because most places you post a clip play the first one and silently ignore the rest. |
 | **Tell me when a clip is saved or a recording starts** | A silent Windows toast. The hotkey gets pressed while you are looking at a game, where Clipper's own toast is somewhere behind it. A recording announces its start too, because the hotkey toggles and nothing else over a game says which way it went. |
 
+![The audio settings: microphone mixed into the game track, device, boost, and noise suppression](docs/screenshots/settings-audio.jpg)
+
 **It stays up.** A display switched to HDR, a monitor turned off to spare an OLED, a resolution
 change, a driver hiccup — none of those is an error worth quitting on. Each one rebuilds the pipeline
 and carries on. Almost every setting applies without a restart, because a restart drops the ring, and
@@ -289,6 +305,8 @@ Each hotkey has an **Alternative** bind underneath it, and that one can be a but
 wheel, a button box, a flight stick or a gamepad — anything Windows calls a game controller — as
 well as a second key combination. Press **Change**, then the button. Your hands are on the wheel
 when the moment happens; reaching for `Ctrl+Alt+F12` mid-corner is not a thing anybody does.
+
+![Hotkeys with alternative binds on a MOZA R5 wheel: Button 1 saves the replay, Button 2 starts and stops a recording](docs/screenshots/settings-binds.jpg)
 
 Buttons and the D-pad on the rim both work, read from the device's own description of itself, so it
 is not a list of supported wheels. A bind remembers the device by its make and model, so it still

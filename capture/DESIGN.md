@@ -194,6 +194,16 @@ Three things make the mix work, and each of them is a thing that goes wrong if s
   its share with silence and carries on, and a mic that fails outright is retried every three
   seconds while everything else keeps recording.
 
+*Following the default is a standing promise, not a choice made at open.* With `micDevice` empty,
+the mixer asks Windows for its default capture endpoint once a second — `GetDefaultAudioEndpoint`
+on a cached enumerator, a lookup inside the process — and when the id no longer matches the open
+mic, drops it and lets the retry open the new one on the same poll. It is the unplug-and-replug path
+exactly, so it costs the same few milliseconds of splice in the voice and leaves the buffer, the
+video and the desktop leg alone. Before this the mic was resolved only when the pipeline was built,
+so a default changed mid-session kept recording the old device until something rebuilt it. Polled
+rather than an `IMMNotificationClient` for the same reason the loopback is: nothing to register, no
+callback thread, and a second is not a delay anybody switching mics will notice.
+
 Summed at unity, not each halved: halving would quietly make every clip's game audio 6 dB softer
 than it was before microphones existed, including through the stretches where nobody says anything.
 What unity costs is headroom, and **a limiter rather than a clamp** is what pays it. A microphone set

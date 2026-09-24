@@ -190,8 +190,12 @@ impl Endpoint {
     /// natively at our rate, which is the common case, the flag costs nothing.
     ///
     /// Returns the endpoint and the device's friendly name, which the settings panel shows so a mic
-    /// that opened is distinguishable from a mic that did not.
-    pub fn microphone(device_id: Option<&str>, rate: u32) -> Result<(Self, String, &'static str)> {
+    /// that opened is distinguishable from a mic that did not, and its endpoint id, which is how the
+    /// mixer tells that the system default has since moved somewhere else.
+    pub fn microphone(
+        device_id: Option<&str>,
+        rate: u32,
+    ) -> Result<(Self, String, String, &'static str)> {
         unsafe {
             let enumerator: IMMDeviceEnumerator =
                 CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
@@ -202,6 +206,7 @@ impl Endpoint {
                 _ => enumerator.GetDefaultAudioEndpoint(eCapture, eConsole)?,
             };
             let name = friendly_name(&device);
+            let id = device.GetId().map(|id| unsafe_string(id)).unwrap_or_default();
 
             let wanted = WAVEFORMATEX {
                 wFormatTag: WAVE_FORMAT_IEEE_FLOAT,
@@ -301,6 +306,7 @@ impl Endpoint {
                     rate_ratio: 1.0,
                 },
                 name,
+                id,
                 how,
             ))
         }
@@ -857,6 +863,11 @@ const MAX_LAG_HNS: i64 = HNS_PER_SECOND / 5;
 /// back in, and the recorder is supposed to still be recording when that happens.
 const MIC_RETRY_HNS: i64 = 3 * HNS_PER_SECOND;
 
+/// How often a microphone following the system default checks whether the default has moved.
+/// One `GetDefaultAudioEndpoint` on a cached enumerator, which is a lookup inside the process, so
+/// a second of lag after somebody switches mics is the only thing this interval trades.
+const MIC_DEFAULT_CHECK_HNS: i64 = HNS_PER_SECOND;
+
 /// What one source has delivered but the mix has not yet emitted.
 #[derive(Default)]
 struct Track {
@@ -956,6 +967,12 @@ pub struct Mixer {
     mic_wanted: bool,
     mic_request: String,
     mic_retry_hns: i64,
+    /// Endpoint id of the microphone that is open, and when to next ask Windows whether its default
+    /// is still that one. Only consulted when `mic_request` is empty — "follow the default" is a
+    /// promise that has to hold after the mic is open, not just at the moment it opens.
+    mic_id: String,
+    mic_default_check_hns: i64,
+    enumerator: Option<IMMDeviceEnumerator>,
     /// The gain in `audio.micGain`, as a multiplier.
     mic_gain: f32,
     /// Noise suppression on the microphone leg, when asked for and when the mix runs at the rate
@@ -1074,6 +1091,9 @@ impl Mixer {
             mic_wanted: mic,
             mic_request: mic_device.to_string(),
             mic_retry_hns: 0,
+            mic_id: String::new(),
+            mic_default_check_hns: 0,
+            enumerator: None,
             mic_gain: 10f32.powf(mic_gain_db / 20.0),
             noise: None,
             noise_origin: None,
@@ -1242,7 +1262,7 @@ impl Mixer {
             Some(self.mic_request.as_str())
         };
         match Endpoint::microphone(device, self.rate) {
-            Ok((endpoint, name, how)) => {
+            Ok((endpoint, name, id, how)) => {
                 let format = endpoint.format();
                 self.mic_open = how;
                 crate::lifecycle::log(&format!(
@@ -1255,6 +1275,7 @@ impl Mixer {
                 ));
                 self.mic = Some(endpoint);
                 self.mic_name = name;
+                self.mic_id = id;
                 self.mic_error = None;
                 self.mike = Track::default();
                 self.reset_noise();
@@ -1268,6 +1289,22 @@ impl Mixer {
                 }
                 self.mic_error = Some(message);
             }
+        }
+    }
+
+    /// The endpoint id Windows currently calls the default microphone. `None` when there is none,
+    /// or when asking failed — neither is a reason to drop a microphone that is working.
+    fn default_mic_id(&mut self) -> Option<String> {
+        unsafe {
+            if self.enumerator.is_none() {
+                self.enumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok();
+            }
+            let device = self
+                .enumerator
+                .as_ref()?
+                .GetDefaultAudioEndpoint(eCapture, eConsole)
+                .ok()?;
+            device.GetId().ok().map(|id| unsafe_string(id))
         }
     }
 
@@ -1286,6 +1323,30 @@ impl Mixer {
         }
 
         let now = crate::clock::qpc_to_hns(crate::clock::qpc_now(), crate::clock::qpc_frequency());
+        // An id that could not be read would never match, and the mic would reopen every second.
+        if self.mic.is_some()
+            && self.mic_request.is_empty()
+            && !self.mic_id.is_empty()
+            && now >= self.mic_default_check_hns
+        {
+            self.mic_default_check_hns = now + MIC_DEFAULT_CHECK_HNS;
+            if let Some(default) = self.default_mic_id() {
+                if default != self.mic_id {
+                    // Treated exactly like an unplug and replug, because that is what it amounts
+                    // to: the old stream goes, the retry below opens the new default on this same
+                    // poll, and the lag cap fills the few milliseconds between with silence. The
+                    // buffer, the video and the desktop leg are not touched.
+                    crate::lifecycle::log(&format!(
+                        "microphone: system default moved away from {}",
+                        self.mic_name
+                    ));
+                    self.mic = None;
+                    self.mike = Track::default();
+                    self.reset_noise();
+                    self.mic_retry_hns = now;
+                }
+            }
+        }
         if self.mic.is_none() && now >= self.mic_retry_hns {
             self.mic_retry_hns = now + MIC_RETRY_HNS;
             self.open_mic();

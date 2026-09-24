@@ -99,6 +99,12 @@ default names the registry value after the app user model id and Task Manager's 
 lists it as `com.clipper.app`. The registration always carries `--hidden`, which `createWindow()`
 turns into `show: false`.
 
+Register **`PORTABLE_EXECUTABLE_FILE`, not `process.execPath`**, when it is set. The portable build
+unpacks to a random `%TEMP%` folder per launch, so `execPath` there is a throwaway copy — and a
+killed instance leaves a husk (exe, no `resources/`) that launches at sign-in and dies on missing
+ICU data. `repairAutostart()` re-points such entries on launch; it reads the Run key with `reg.exe`
+because Electron's `launchItems` only lists entries whose path already matches.
+
 Read the state back with **`executableWillLaunchAtLogin`, never `openAtLogin`** — this costs an hour
 to rediscover. On Windows `openAtLogin` is computed by comparing the registered command line against
 the `args` you pass in, and Electron drops `--hidden` from the args it parses back out of the

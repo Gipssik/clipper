@@ -1,7 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, nativeImage, Notification, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { spawn } = require('child_process');
+const { spawn, execFileSync } = require('child_process');
 const net = require('net');
 const os = require('os');
 
@@ -48,17 +48,48 @@ function savePrefs(prefs) {
 const HIDDEN_FLAG = '--hidden';
 const startedHidden = process.argv.includes(HIDDEN_FLAG);
 
-// Packaged, process.execPath is Clipper.exe and the flag is the whole of it. Run from source it
-// is electron.exe, which has no idea which project to open unless it is handed back.
+// Installed, process.execPath is Clipper.exe and the flag is the whole of it. The portable build
+// is a self-extractor: it unpacks to a fresh random folder under %TEMP% on every launch and
+// deletes it on exit, so process.execPath there names an exe that is gone by the next sign-in.
+// Its launcher hands over the path of the real, user-visible exe in PORTABLE_EXECUTABLE_FILE.
+// Run from source it is electron.exe, which has no idea which project to open unless it is
+// handed back.
+const LOGIN_EXE = process.env.PORTABLE_EXECUTABLE_FILE || process.execPath;
+
 function loginItem(openAtLogin) {
   return {
     openAtLogin,
     // Without this the registry value is named after the app user model id, so Task Manager's
     // Startup tab lists the entry as `com.clipper.app`.
     name: 'Clipper',
-    path: process.execPath,
+    path: LOGIN_EXE,
     args: app.isPackaged ? [HIDDEN_FLAG] : [path.resolve(app.getAppPath()), HIDDEN_FLAG],
   };
+}
+
+// Portable builds before this fix registered the %TEMP% copy, so there are entries out there
+// that are switched on and point at nothing — or worse, at a husk: when the unpacked app is
+// killed rather than quit, cleanup deletes resources/ but not the still-locked Clipper.exe, which
+// then launches at sign-in, finds no ICU data and dies. So re-point an entry whose exe is gone or
+// lives under %TEMP%, where no real copy of the app does. Leave any other exe alone: that is an
+// installed copy and a portable one both registered, and whichever the user switched on last
+// should keep it.
+//
+// Read with reg.exe rather than `launchItems`: Electron only lists entries whose path matches the
+// one asked about, so an entry pointing somewhere else — the very case here — never shows up.
+function repairAutostart() {
+  if (!app.isPackaged) return;
+  try {
+    const out = execFileSync('reg', ['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run',
+      '/v', 'Clipper'], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).toString();
+    const data = (out.match(/REG_SZ\s+(.*)$/m) || [])[1] || '';
+    const exe = (data.match(/^"?(.+?\.exe)"?/i) || [])[1];
+    const inTemp = exe && path.resolve(exe).toLowerCase()
+      .startsWith(path.resolve(os.tmpdir()).toLowerCase() + path.sep);
+    if (exe && exe.toLowerCase() !== LOGIN_EXE.toLowerCase() && (inTemp || !fs.existsSync(exe))) {
+      app.setLoginItemSettings(loginItem(true));
+    }
+  } catch {}   // no entry: reg exits non-zero, and there is nothing to repair
 }
 
 // Read back from Windows rather than from prefs.json. The registry entry is the thing that is
@@ -138,6 +169,7 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 app.whenReady().then(() => {
+  repairAutostart();
   createWindow();
   setupTray();
   if (loadCaptureConfig().enabled) startCaptureDaemon();

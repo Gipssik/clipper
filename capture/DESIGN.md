@@ -197,8 +197,9 @@ exactly the length of every silence. *Real* is load-bearing: see what the deskto
 endpoint's mix format is whatever the user's device says (often 48 kHz float32 stereo, but 44.1,
 96 kHz and 7.1 all happen in the wild), and the AAC MFT wants 16-bit PCM stereo at 44.1 or 48 kHz,
 so there is a convert/downmix/resample step — use `CLSID_CResamplerMediaObject` rather than writing
-one. An `IMMNotificationClient` watches for the default endpoint changing (headphones plugged in)
-and restarts the audio leg without disturbing video.
+one. The leg follows the default endpoint when it changes (headphones plugged in, a headset picked
+in the volume flyout) and reopens without disturbing video — polled, not an `IMMNotificationClient`;
+see what switching outputs corrected, which is also where this sentence stopped being a plan.
 
 **The microphone, mixed into the same track.** A second WASAPI stream, this time a capture
 endpoint, summed with the desktop leg into one stereo track. On by default, because nobody thinks to
@@ -237,7 +238,7 @@ exactly, so it costs the same few milliseconds of splice in the voice and leaves
 video and the desktop leg alone. Before this the mic was resolved only when the pipeline was built,
 so a default changed mid-session kept recording the old device until something rebuilt it. Polled
 rather than an `IMMNotificationClient` for the same reason the loopback is: nothing to register, no
-callback thread, and a second is not a delay anybody switching mics will notice.
+callback thread, and a quarter of a second is not a delay anybody switching mics will notice.
 
 Summed at unity, not each halved: halving would quietly make every clip's game audio 6 dB softer
 than it was before microphones existed, including through the stretches where nobody says anything.
@@ -1102,7 +1103,58 @@ The shape worth keeping: **a number chosen to fix one problem stays after the pr
 elsewhere.** Every bitrate rise here was a reasonable response to a real complaint, and all of them
 were still in place after the actual causes had been found and corrected.
 
+## What switching outputs corrected
+
+Reported as "when a default output device changes, the capturing process stops capturing audio from
+desktop". The design above said an `IMMNotificationClient` would restart the audio leg when the
+default moved. It was never written: the loopback opened whatever was the default when the
+pipeline was built and held it until something else caused a rebuild.
+
+**Holding the old device fails silently.** Switching from speakers to a headset leaves the speakers
+present and working, so the loopback on them never errors. It keeps delivering packets of nothing,
+and the keep-alive stream keeps the old device's engine running, so none of the gap detection has
+anything to see either. Reproduced by moving the default between two virtual outputs while
+`clipper-capture audio --wav` ran: the shipped build recorded **5.0 s of digital silence** for the
+five seconds the default was elsewhere, with whatever was playing still audible on the new device.
+
+The desktop leg now does what the microphone left on "default" already did. Every 250 ms the mixer
+asks for the default render endpoint's id. When the id moves, the old stream and its keep-alive are
+dropped and the new default is opened on the same poll. An error from the device, whether in
+`poll` or in the keep-alive's `pump`, is handled the same way: the leg is dropped and the default is
+retried every second. Before this, that error propagated and cost a pipeline rebuild after thirty
+ticks. The ring, the video and the microphone are not touched either way.
+
+**The new device's samples have to land at their own time.** On the pass-through path, with no
+microphone, a fresh `Pacer` would start its timeline at its first packet. The new device's audio
+would then follow straight on from the old one's, the gap would vanish from the track, and every clip
+after a switch would have its audio early by however long the switch took. So the new pacer is
+*resumed* at the old one's position (`Pacer::resume`). The gap becomes a hole like any other and is
+filled, and a first packet stamped before the handover is trimmed rather than stretched back over
+seconds at one percent. While there is no device at all, the pass-through path emits silence on the
+clock, 200 ms behind the present, so the track keeps pace with the video instead of stalling and
+arriving all at once. The mixed path needed less: it already lines each track up by timestamp, so the
+desktop track starts over, and the mix falls back to the clock only when no source is delivering.
+
+**Rate.** A device at a different rate from the mix is opened through the audio engine's converter
+(`AUTOCONVERTPCM`, as the microphone does), which works in loopback as well: a 48 kHz endpoint read
+at 44.1 kHz delivered 88,608 frames in 2 s. If a driver refuses the conversion, `desk_rate_changed`
+makes the pipeline stale, and it is rebuilt at the new rate. That is the one case that costs the
+buffer.
+
+Measured through the whole app, with the default moved Realtek → Pimax → Realtek inside one buffer:
+the saved clip has no silent 250 ms window at all, and audio ends 8 ms from the video. The virtual
+Oculus device was slower, with 0.5–2 s of silence at a switch. That device takes about a second to
+start again once released (the old build never released it), and its first packet comes back stamped
+a second stale, which `anchor` corrects. `status` gains `deskDevice` and `deskError`, and the panel's
+desktop-audio tip names the device being recorded, because that can now change under it.
+
 ## Known limits
+
+- **Only the default output is recorded.** Audio an application sends to a device of its own
+  choosing — voice chat pinned to a headset while the game plays on speakers — is not in the clip.
+  Every output at once would need either a loopback per device, each on its own clock and mixed, or
+  process loopback (`ActivateAudioInterfaceAsync` with `PROCESS_LOOPBACK` excluding Clipper's own
+  tree, which would also keep the replay-saved sound out of the next replay). Neither is built.
 
 - **Elevated games swallow the hotkey.** `RegisterHotKey` from a normal-integrity process never
   sees keys while an admin-elevated game has focus. A low-level keyboard hook has the same

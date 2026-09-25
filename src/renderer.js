@@ -2004,6 +2004,7 @@ const replayPathValue   = document.getElementById('replay-path-value');
 const replayPathBtn     = document.getElementById('replay-path-btn');
 const replayPerGameSw   = document.getElementById('replay-pergame-switch');
 const replayAudioSw     = document.getElementById('replay-audio-switch');
+const replayAudioTip    = document.getElementById('replay-audio-tip');
 const replayMicRow      = document.getElementById('replay-mic-row');
 const replayMicSw       = document.getElementById('replay-mic-switch');
 const replayMicField    = document.getElementById('replay-mic-device-field');
@@ -2143,6 +2144,7 @@ function applyReplayUi() {
   replayPerGameSw.classList.toggle('on', c.perGameSubfolder);
   const audio = c.audio || {};
   replayAudioSw.classList.toggle('on', !!audio.desktop);
+  renderDeskTip();
   replayMicSw.classList.toggle('on', !!audio.mic);
   replayMicField.classList.toggle('off', !audio.mic);
   replayMicGainField.classList.toggle('off', !audio.mic);
@@ -2323,6 +2325,22 @@ function renderForeground() {
 // "there is no voice in my clip" has three different causes: not asked for, asked for and running,
 // asked for and refused. A mic that failed to open has to look different from a quiet room.
 let replayMicState = { active: false, device: '', error: null, wanted: false, peakDb: null };
+
+// Which output the desktop leg is on. It follows Windows' default, so it can change under the
+// panel — switching from speakers to a headset moves it — and the tip says where it went.
+let replayDeskState = { device: '', error: null };
+
+function renderDeskTip() {
+  const base = 'Everything playing on your default output — the game, your call, music. Switch between speakers and a headset in Windows and it follows, keeping the buffer; the switch itself can cost a moment of game audio. Costs about 24 KB a second.';
+  const on = replayConfig && replayConfig.audio && replayConfig.audio.desktop;
+  if (on && replayDeskState.error && !replayDeskState.device) {
+    replayAudioTip.textContent = `No output to record right now: ${replayDeskState.error}. Still recording everything else, and it picks up the next default on its own.`;
+  } else if (on && replayDeskState.device) {
+    replayAudioTip.textContent = `${base} Recording ${replayDeskState.device}.`;
+  } else {
+    replayAudioTip.textContent = base;
+  }
+}
 
 function renderMicTip() {
   const chosen = replayMicSel.selectedOptions[0];
@@ -2793,6 +2811,9 @@ api.onCaptureEvent((event) => {
         peakDb: typeof event.micPeakDb === 'number' ? event.micPeakDb : null,
       };
       renderMicTip();
+      // A device name with an error beside it is the leg between devices: name the error.
+      replayDeskState = { device: event.deskError ? '' : (event.deskDevice || ''), error: event.deskError || null };
+      renderDeskTip();
       renderNoiseWarning(event.noiseError || null);
       renderForeground();
       if ((event.enabled || recording.active) && !event.displayPresent) {

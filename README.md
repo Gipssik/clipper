@@ -272,7 +272,7 @@ game goes to one shared **Desktop** folder rather than getting a folder of its o
 | **Quality** | 720p60 / 1080p60 / **1080p HQ** / 1440p60 / native. The panel quotes megabytes-per-minute for each, because that is the number you recognise from your clips folder. |
 | **Screen** | Which display to record. |
 | **When to record** | Only in games, or always. |
-| **Desktop audio** | Everything you can hear. About 24 KB/s. |
+| **Desktop audio** | Everything playing on your default output. Switch between speakers and a headset in Windows and it follows, without losing the buffer. About 24 KB/s. |
 | **Microphone** | Mixed into the *same* track as the game, with an optional boost for when Windows' own level runs out at 100%. One track, because most places you post a clip play the first one and silently ignore the rest. |
 | **Tell me when a clip is saved or a recording starts** | A silent Windows toast. The hotkey gets pressed while you are looking at a game, where Clipper's own toast is somewhere behind it. A recording announces its start too, because the hotkey toggles and nothing else over a game says which way it went. |
 | **Play a sound when a replay is saved** | On by default. Plays once the file is written — about a twentieth of a second after the press — so hearing it means the clip exists. Pick **Chime**, **Pop** or **Sparkle**; all three are mastered to the same loudness, a little under typical game audio. The recorder hears it too, so a replay saved shortly after another has the first one's sound in the background. |

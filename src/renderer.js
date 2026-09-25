@@ -359,6 +359,7 @@ function syncGrid() {
     });
     cardMap.clear();
     gridEmpty.classList.add('show');
+    pruneSelection();
     return;
   }
   gridEmpty.classList.remove('show');
@@ -389,7 +390,116 @@ function syncGrid() {
     const sibling = videoGrid.children[i];
     if (sibling !== card) videoGrid.insertBefore(card, sibling ?? null);
   });
+  pruneSelection();
 }
+
+// ── Selection ─────────────────────────────────────────────────────────────────
+// Entered from a card's menu with that card ticked. While it lasts, a click anywhere on a card
+// ticks it instead of opening it, and the filters bar becomes the selection bar. Keyed by
+// fullPath, like every other per-clip cache, so a rescan that keeps a file keeps its tick.
+let selection = null;   // Set of fullPaths while selecting, null otherwise
+let deletingSelection = false;
+const selectCount     = document.getElementById('select-count');
+const selectSize      = document.getElementById('select-size');
+const selectAllBtn    = document.getElementById('select-all-btn');
+const selectCancelBtn = document.getElementById('select-cancel-btn');
+const selectDeleteBtn = document.getElementById('select-delete-btn');
+
+function enterSelection(firstPath) {
+  closeOpenDropdown();
+  selection = new Set(firstPath ? [firstPath] : []);
+  document.body.classList.add('selecting');
+  renderSelection();
+}
+
+function exitSelection() {
+  selection = null;
+  document.body.classList.remove('selecting');
+  cardMap.forEach(card => card.classList.remove('selected'));
+}
+
+function toggleSelected(card) {
+  const path = card._video.fullPath;
+  if (selection.has(path)) selection.delete(path); else selection.add(path);
+  renderSelection();
+}
+
+// A file that vanished — deleted from outside, or moved — cannot stay ticked.
+function pruneSelection() {
+  if (!selection) return;
+  for (const path of selection) if (!cardMap.has(path)) selection.delete(path);
+  renderSelection();
+}
+
+function selectedRecords() {
+  return selection ? [...selection].map(p => cardMap.get(p)?._video).filter(Boolean) : [];
+}
+
+function renderSelection() {
+  if (!selection) return;
+  cardMap.forEach((card, path) => card.classList.toggle('selected', selection.has(path)));
+  const recs = selectedRecords();
+  const n = recs.length;
+  selectCount.textContent = n === 1 ? '1 clip' : `${n} clips`;
+  selectSize.textContent = n ? fmtBytes(recs.reduce((sum, r) => sum + r.size, 0)) : '';
+  const visible = getFilteredVideos();
+  const allTicked = visible.length > 0 && visible.every(v => selection.has(v.fullPath));
+  selectAllBtn.textContent = allTicked ? 'Select none' : 'Select all';
+  selectDeleteBtn.textContent = n ? `Delete ${n}` : 'Delete';
+  selectDeleteBtn.disabled = !n || deletingSelection;
+}
+
+selectAllBtn.addEventListener('click', () => {
+  const visible = getFilteredVideos().map(v => v.fullPath);
+  const allTicked = visible.every(p => selection.has(p));
+  visible.forEach(p => allTicked ? selection.delete(p) : selection.add(p));
+  renderSelection();
+});
+
+selectCancelBtn.addEventListener('click', exitSelection);
+
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape' || !selection || deletingSelection) return;
+  // Every overlay has its own Escape; selection only gets it when nothing is on top of the grid.
+  if ([modalOverlay, encodeOverlay, settingsOverlay, presetOverlay].some(o => o.classList.contains('open'))) return;
+  exitSelection();
+});
+
+// The same order the single delete keeps: stop watching, let go of anything holding the files,
+// delete, then rescan once. One confirmation for the lot, naming how much it frees.
+selectDeleteBtn.addEventListener('click', async () => {
+  const recs = selectedRecords();
+  if (!recs.length || deletingSelection) return;
+  const total = recs.reduce((sum, r) => sum + r.size, 0);
+  const what = recs.length === 1 ? `"${recs[0].name}"` : `${recs.length} clips (${fmtBytes(total)})`;
+  if (!confirm(`Delete ${what}?\n\nThis cannot be undone.`)) return;
+
+  deletingSelection = true;
+  renderSelection();
+  api.watchFolder('');
+  stopHoverPreview();
+  if (currentClip && selection.has(currentClip.fullPath)) closeModal();
+  await new Promise(r => setTimeout(r, 500));
+
+  const failed = [];
+  let freed = 0;
+  for (const rec of recs) {
+    const result = await api.deleteFile(rec.fullPath);
+    if (result.success) freed += rec.size;
+    else failed.push(`${rec.name}: ${result.error}`);
+  }
+  deletingSelection = false;
+  exitSelection();
+  await scanAndRender();   // restarts the watcher
+
+  const done = recs.length - failed.length;
+  if (!failed.length) {
+    showToast(`✓ Deleted ${done === 1 ? '1 clip' : done + ' clips'} — ${fmtBytes(freed)} freed`, 'success');
+  } else {
+    const more = failed.length > 1 ? ` (and ${failed.length - 1} more)` : '';
+    showToast(`Deleted ${done} of ${recs.length}. ${failed[0]}${more}`, 'error', 6000);
+  }
+});
 
 // Everything a card displays — badges, still, size and date — is derived once, when the
 // card is built. A replace-mode trim, compress, convert or export (or an edit from
@@ -448,6 +558,10 @@ function makeCard(v) {
       Convert HDR → SDR…
     </div>
     <div class="vid-dropdown-sep"></div>
+    <div class="vid-dropdown-item" data-action="select">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="1.5" width="9" height="9" rx="2"/><path d="M3.8 6.1l1.6 1.6 2.9-3.3"/></svg>
+      Select
+    </div>
     <div class="vid-dropdown-item danger" data-action="delete">
       <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 3h8M5 3V2h2v1M5 5v4M7 5v4M3 3l.5 7h5l.5-7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
       Delete file
@@ -467,6 +581,8 @@ function makeCard(v) {
       openEncodeModal(rec, 'convert');
     } else if (action === 'sdr') {
       openEncodeModal(rec, 'sdr');
+    } else if (action === 'select') {
+      enterSelection(rec.fullPath);
     } else if (action === 'delete') {
       if (!confirm(`Delete "${rec.name}"?\n\nThis cannot be undone.`)) return;
       api.watchFolder('');
@@ -489,6 +605,7 @@ function makeCard(v) {
   card.innerHTML = `
     <div class="vid-thumb">
       <img class="vid-thumb-img" alt="" />
+      <div class="vid-check"><svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="#0a0a0b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.2l2.4 2.4 4.6-5"/></svg></div>
       <div class="vid-badges"></div>
       <div class="thumb-overlay">
         <div class="play-circle">
@@ -536,9 +653,14 @@ function makeCard(v) {
   });
   thumbEl.addEventListener('mouseleave', stopHoverPreview);
 
-  // Click card body = open modal
-  card.querySelector('.vid-card-body').addEventListener('click', () => openModal(card._video || v));
-  card.querySelector('.vid-thumb').addEventListener('click', () => openModal(card._video || v));
+  // Click card = open modal, or while selecting, tick it: anywhere on the card, not only the box.
+  const onCardClick = () => {
+    if (selection) { toggleSelected(card); return; }
+    openModal(card._video || v);
+  };
+  card.querySelector('.vid-card-body').addEventListener('click', onCardClick);
+  card.querySelector('.vid-thumb').addEventListener('click', onCardClick);
+  if (selection?.has(v.fullPath)) card.classList.add('selected');
 
   // Menu button
   card.querySelector('.vid-menu-btn').addEventListener('click', e => {

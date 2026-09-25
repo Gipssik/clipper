@@ -100,6 +100,9 @@ files are going to give somebody trouble.
 - **Hover a card** and it plays in place. Turn it off in Settings if scrolling a big folder feels heavy.
 - **Filter by category**, with a search box once you have more games than fit on screen.
 - **Sort** newest or oldest first.
+- **Delete several at once.** A card's **⋮** menu → **Select** puts a checkbox on every card; click
+  anywhere on a card to tick it, then **Delete** from the bar at the top. It shows how much the
+  selection frees before you commit, and **Esc** backs out.
 - **The folder is watched.** A clip saved by the recorder — or by anything else — shows up without a
   refresh, and a file *rewritten in place* has its card rebuilt: new still, new badges, new size.
 

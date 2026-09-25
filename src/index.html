@@ -176,6 +176,19 @@
 
   .filter-divider { width: 1px; height: 20px; background: var(--border2); flex-shrink: 0; margin: 0 4px; }
 
+  /* ── Selection ── */
+  /* Selecting takes over the filters bar: the grid is frozen on what was showing, so "select
+     all" means what you can see. */
+  #select-bar { display: none; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+  body.selecting #filters-bar > :not(#select-bar) { display: none; }
+  body.selecting #select-bar { display: flex; }
+  #select-count { font-size: calc(12px * var(--font-scale)); color: var(--text); white-space: nowrap; }
+  #select-size { font-size: calc(12px * var(--font-scale)); color: var(--text3); white-space: nowrap; }
+  .select-spacer { flex: 1; }
+  .sort-btn.danger { border-color: rgba(255,82,82,0.45); color: var(--danger); }
+  .sort-btn.danger:hover { background: rgba(255,82,82,0.12); border-color: var(--danger); color: var(--danger); }
+  .sort-btn:disabled { opacity: 0.35; pointer-events: none; }
+
   .sort-btn {
     padding: 4px 12px; border-radius: 20px; border: 1px solid var(--border2);
     background: transparent; color: var(--text2); font-family: 'Syne', sans-serif;
@@ -230,6 +243,22 @@
   .vid-card:hover .play-circle { transform: scale(1); }
 
   .vid-card-body { padding: 10px 12px 11px; }
+
+  .vid-check {
+    position: absolute; top: 8px; left: 8px; z-index: 7;
+    width: 20px; height: 20px; border-radius: 5px;
+    border: 1.5px solid rgba(255,255,255,0.75); background: rgba(10,10,11,0.55);
+    display: none; align-items: center; justify-content: center;
+    transition: background 0.12s, border-color 0.12s;
+  }
+  .vid-check svg { opacity: 0; transition: opacity 0.12s; }
+  body.selecting .vid-check { display: flex; }
+  body.selecting .vid-menu-btn { visibility: hidden; }
+  body.selecting .thumb-overlay { display: none; }
+  .vid-card.selected { border-color: var(--accent); }
+  .vid-card.selected:hover { border-color: var(--accent); }
+  .vid-card.selected .vid-check { background: var(--accent); border-color: var(--accent); }
+  .vid-card.selected .vid-check svg { opacity: 1; }
   /* The menu sits at the end of the meta row now that there is no name row above it. */
   .vid-menu-btn {
     flex-shrink: 0; width: 22px; height: 22px; border: none; background: transparent;
@@ -906,6 +935,16 @@
       <span id="sort-label">Newest</span>
       <span id="sort-arrow">↓</span>
     </button>
+
+    <div id="select-bar">
+      <span class="filter-label">Selected</span>
+      <span id="select-count">0 clips</span>
+      <span id="select-size"></span>
+      <button class="sort-btn" id="select-all-btn" title="Ticks every clip in the grid — the category you had open when you started selecting. Click again to clear.">Select all</button>
+      <div class="select-spacer"></div>
+      <button class="sort-btn" id="select-cancel-btn" title="Leaves selection without deleting anything (Esc)">Cancel</button>
+      <button class="sort-btn danger" id="select-delete-btn" title="Deletes the ticked files from disk. They do not go to the Recycle Bin, so this cannot be undone." disabled>Delete</button>
+    </div>
   </div>
 
   <!-- Grid -->

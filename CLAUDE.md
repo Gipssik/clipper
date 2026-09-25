@@ -24,6 +24,7 @@ node --check src/main.js   # the only static check available; there is no linter
 
 cd capture && cargo build --release      # the recorder; copy the exe to capture-bin/ to ship it
 python assets/source/mkicons.py          # regenerate every icon from assets/source/icon.png
+python assets/source/mksounds.py         # regenerate the replay-saved sounds in assets/sounds/
 ```
 
 `ffmpeg-bin/ffmpeg.exe` is tracked in **Git LFS** (~130 MB) and bundled via electron-builder
@@ -86,6 +87,13 @@ outputs. Two things that script knows and a replacement would have to relearn: e
 unpremultiplying against the master's black background rather than by colour-keying, which is what
 keeps a 16px mark from looking fringed. `assets/source/` is excluded from the package via a
 `!assets/source/**` filter — the master is repo history, not payload.
+
+**The replay-saved sounds are generated the same way.** `assets/sounds/*.wav` come out of
+`assets/source/mksounds.py`, which synthesises them from sines (stdlib only) and uses ffmpeg's
+`ebur128` to set every one to the same momentary loudness, so choosing a different sound never
+changes the volume. The window plays them on `clip-saved`, not the daemon. It works hidden in the
+tray, with no user gesture. The desktop loopback records the sound like any other output, so the
+next replay contains it; excluding it would take process loopback in `audio.rs`.
 
 The same `assets/icon.ico` is compiled into `clipper-capture.exe` by `capture/build.rs`, along with
 a version resource. That resource is not cosmetic: `FileDescription` is what Task Manager prints in

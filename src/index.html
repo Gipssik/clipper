@@ -607,6 +607,7 @@
   }
   #replay-mictest-text { position: relative; }
   .replay-row { display: flex; gap: 8px; align-items: center; }
+  .replay-row .enc-select { flex: 1 1 auto; min-width: 0; }
   .enc-label.alt-label { margin-top: 12px; }
   .replay-row button:disabled { opacity: 0.4; pointer-events: none; }
   .replay-row .replay-value {
@@ -1381,7 +1382,7 @@
               <div class="enc-tip">Records from the microphone above with the boost and noise suppression exactly as they are set now, then plays it back &mdash; through the same code a saved clip goes through, so this is what a clip of you will sound like. Stops on its own after 30 seconds. Change a setting and test again to compare.</div>
             </div>
 
-            <div class="enc-field" style="margin-bottom:0">
+            <div class="enc-field">
               <div class="set-toggle-row" id="replay-notify-row">
                 <div class="set-toggle-text">
                   <div class="enc-label" style="margin-bottom:6px"><span>Tell me when a clip is saved or a recording starts</span></div>
@@ -1389,6 +1390,29 @@
                 </div>
                 <div class="set-switch on" id="replay-notify-switch"></div>
               </div>
+            </div>
+
+            <div class="enc-field for-replay">
+              <div class="set-toggle-row" id="replay-sound-row">
+                <div class="set-toggle-text">
+                  <div class="enc-label" style="margin-bottom:6px"><span>Play a sound when a replay is saved</span></div>
+                  <div class="enc-tip" style="margin-top:0">The one confirmation that reaches you without looking away from the game. Plays once the file is actually written, about a twentieth of a second after the press, so hearing it means the clip exists. The recorder hears it too: a replay saved within the next buffer-length has it in the background.</div>
+                </div>
+                <div class="set-switch on" id="replay-sound-switch"></div>
+              </div>
+            </div>
+
+            <div class="enc-field for-replay" id="replay-sound-field" style="margin-bottom:0">
+              <div class="enc-label"><span>Sound</span></div>
+              <div class="replay-row">
+                <select class="enc-select" id="replay-sound-select">
+                  <option value="chime">Chime</option>
+                  <option value="pop">Pop</option>
+                  <option value="sparkle">Sparkle</option>
+                </select>
+                <button id="replay-sound-test">Play</button>
+              </div>
+              <div class="enc-tip" id="replay-sound-tip"></div>
             </div>
 
             <div id="replay-status"><span class="dot"></span><span id="replay-status-text">Not running</span></div>

@@ -406,6 +406,9 @@ const CAPTURE_DEFAULTS = {
   version: 1,
   gameDetection: 'auto',
   notifyOnSave: true,
+  // Played by the window, not the daemon, when a replay lands: one of assets/sounds/*.wav.
+  soundOnSave: true,
+  saveSound: 'chime',
   enabled: false,          // off until asked for: it costs GPU time and disk continuously
   recordMode: 'game',
   bufferSeconds: 60,
@@ -632,8 +635,9 @@ function handleCaptureEvent(event) {
 }
 
 // A toast in the corner of the screen, because the hotkey is pressed while you are looking at a
-// game and the app's own toast is behind it. Silent on purpose: this fires mid-play, and a
-// notification chime over your own game audio is worse than no notification at all.
+// game and the app's own toast is behind it. Silent on purpose: this fires mid-play, and Windows'
+// generic notification ding over your own game audio is worse than no notification at all. The
+// sound a saved replay does make is the window's (`soundOnSave`), one made to sit under a game.
 function notifyClipSaved(event) {
   if (!Notification.isSupported()) return;
   if (loadCaptureConfig().notifyOnSave === false) return;

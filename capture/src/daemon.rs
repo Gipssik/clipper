@@ -1361,6 +1361,7 @@ fn status(
         "desktopAudio": config.audio.desktop,
         // Which output the desktop leg is following right now, and why it has none when it has
         // none. It moves with Windows' default, so the panel says where it went.
+        "deskMethod": pipeline.and_then(|p| p.audio.as_ref()).and_then(|m| m.desk_method()),
         "deskDevice": pipeline.and_then(|p| p.audio.as_ref()).and_then(|m| m.desk_name()),
         "deskError": pipeline.and_then(|p| p.audio.as_ref()).and_then(|m| m.desk_error()),
         "micWanted": config.audio.mic,

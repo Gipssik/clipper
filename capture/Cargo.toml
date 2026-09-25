@@ -16,6 +16,9 @@ png = { version = "0.17", optional = true }
 # See denoise.rs. The default features are its command-line tools.
 nnnoiseless = { version = "0.5.2", default-features = false }
 
+# `windows`' own core crate, named directly because `#[implement]` expands to paths in it.
+windows-core = "0.62"
+
 [dependencies.windows]
 version = "0.62"
 features = [

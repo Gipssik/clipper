@@ -189,7 +189,10 @@ eviction cannot delete them mid-copy, then on a background thread concatenate th
 the bundled ffmpeg — `-c copy -bsf:a aac_adtstoasc -movflags +faststart`. Capture and encode never
 block on any of this, so the game does not stutter while a clip is written.
 
-**Audio.** WASAPI loopback on the default render endpoint, polled rather than event-driven —
+**Audio.** Process loopback — every application except Clipper's own process tree, on every
+output — read on a thread of its own; see what recording every app corrected. Where Windows cannot
+do that, the fallback, and what this paragraph described alone before: WASAPI loopback on the
+default render endpoint, polled rather than event-driven —
 loopback does not support event callbacks. Loopback delivers nothing while no audio is playing, so
 we also open a silent render stream to keep the engine pumping, and fill any real residual gap from
 the device's own QPC timestamps — otherwise the audio track ends up shorter than the video by
@@ -640,7 +643,9 @@ thing that can go wrong on its own, and most of them own a counter that says whe
 
 | file | owns |
 |---|---|
-| `audio.rs` | WASAPI endpoints, the keep-alive stream, rate matching a microphone, the two-source mixer and its limiter |
+| `audio.rs` | WASAPI endpoints, the keep-alive stream, rate matching, the two-source mixer and its limiter |
+| `desktop.rs` | the desktop leg's worker thread: which source to open, following the default output, and padding the track when the worker falls behind |
+| `procloop.rs` | activating process loopback, and which process tree it leaves out |
 | `denoise.rs` | noise suppression on the microphone: RNNoise, the strength blend, and the frame of latency taken back out |
 | `aac.rs` | AAC encode, and the resampler for endpoints Media Foundation will not take directly |
 
@@ -664,11 +669,13 @@ thing that can go wrong on its own, and most of them own a counter that says whe
 classification that changes every half second, the second is a one-shot lookup whose answer cannot
 change while the same process holds the foreground.
 
-Two environment variables exist for testing and change nothing when unset.
+Three environment variables exist for testing and change nothing when unset.
 `CLIPPER_CAPTURE_INSTANCE` suffixes the single-instance mutex and the pipe name (Electron's
 `CAPTURE_PIPE` reads it too), so a harness can run its own daemon beside a real Clipper's.
 `CLIPPER_KEEP_TS` keeps a recording's `.ts` after it is published, so a timing question about the MP4
-can be told apart from one about the muxer. `--stall-after` wedges only the pipeline running when the
+can be told apart from one about the muxer. `CLIPPER_ENDPOINT_LOOPBACK` makes the desktop leg skip
+process loopback and use the fallback, which is otherwise only reachable on an older Windows.
+`--stall-after` wedges only the pipeline running when the
 stall begins; the one the watchdog builds to replace it runs normally, as it would after a real wedge.
 
 `dump.rs` is behind the `dump` feature and has no part in recording — it writes PNGs so the capture
@@ -1161,13 +1168,67 @@ start again once released (the old build never released it), and its first packe
 a second stale, which `anchor` corrects. `status` gains `deskDevice` and `deskError`, and the panel's
 desktop-audio tip names the device being recorded, because that can now change under it.
 
+## What recording every app corrected
+
+Endpoint loopback, even following the default, reads one device's mix. Two things fell out of that.
+Audio an application sends to a device of its own choosing, such as voice chat pinned to a headset
+while the game plays on speakers, was not in the clip. And Clipper was: the replay-saved sound
+landed in the next replay, and so did a clip previewed in the grid. Process loopback in exclude mode
+fixes both at once. The audio engine hands over the mix of every process except one tree, whatever
+device each plays to. It also makes an "ignore sound from this app" setting a matter of adding
+process ids.
+
+It was measured against endpoint loopback before anything was built on it, with a throwaway
+subcommand polling on the same 10 ms tick. The sources were Chromium players, since unlike
+`SoundPlayer` they follow the default the way a game does.
+
+- **Coverage.** One tone on the default output, a second pinned to another device. Endpoint loopback
+  got the first only. Process loopback got both at the same level.
+- **Exclusion.** Excluding a player's process removed its tone completely (-140 dB), even though
+  Chromium renders audio from a utility process of its own; including only it kept only it.
+  Through the whole app, the chime and sparkle played by the renderer read at -20 and -24 dB in a
+  clip on the fallback and at the -87 dB noise floor on process loopback, with a tone from another
+  app present in both.
+- **Timing.** Beeps captured by both at once land a constant **6.3 ms** later on process loopback,
+  identical on every beep: well under a frame, and not corrected. Its timestamps come from the sample
+  count (zero jitter), so the thing to check was drift against the capture clock over time.
+  **0.007 ms over five minutes.**
+- **Silence.** It delivers packets through total silence without a keep-alive stream: 29,999 of
+  30,000 polls over five silent minutes. So there is no render stream to open in this mode.
+- **Cost.** 200–270 megacycles per 30 s for either, about 0.2% of one core. `audiodg` read within
+  its own noise for both.
+- **Device switches.** Nothing to follow: the engine moves each application's stream and the mix
+  follows it. Realtek → Audeze → Realtek through the whole pipeline: no reopen, frames 16.7 ms apart,
+  and a tone that dipped at each switch rather than dropping out.
+
+One thing it does that endpoint loopback did not: **a read can block for a second** while a device
+starts. `GetNextPacketSize` sat for ~1 s at each switch between the two virtual outputs here, and
+that second of audio is simply missing. The timestamps jump honestly across the gap, so the pacer
+fills it. On the tick that would have been a second of video; on the worker it is padded silence
+and nothing else. Activation, likewise, took 2 ms normally and just under a second while a device
+was starting.
+
+Selection is in `desktop.rs`. Process loopback is tried first; the first activation failure turns it
+off for the life of the worker and the leg falls back to endpoint loopback on the default output,
+following it as before. The dev hooks that exist to exercise endpoint loopback (`--tone`,
+`--no-keepalive`) and `CLIPPER_ENDPOINT_LOOPBACK` go straight to the fallback. The mix rate is
+48 kHz, chosen rather than inherited: the engine converts every application to it. `status` gains
+`deskMethod` ("every app" or "default output"), and the panel says which one is running.
+
+The tree left out is Clipper's main process: the daemon passes its `--parent-pid` to
+`procloop::exclude_tree`, and that tree holds the renderer, Chromium's audio process and the
+daemon. Run without a parent (`record`, `audio`), it leaves out only itself. A test that needs a
+sound *in* the recording must therefore play it from outside that tree. Started from the harness,
+it is Clipper's and is left out.
+
 ## Known limits
 
-- **Only the default output is recorded.** Audio an application sends to a device of its own
-  choosing — voice chat pinned to a headset while the game plays on speakers — is not in the clip.
-  Every output at once would need either a loopback per device, each on its own clock and mixed, or
-  process loopback (`ActivateAudioInterfaceAsync` with `PROCESS_LOOPBACK` excluding Clipper's own
-  tree, which would also keep the replay-saved sound out of the next replay). Neither is built.
+- **The fallback records the default output only, Clipper included.** Where process loopback cannot
+  be activated (before Windows 10 2004), audio sent to any other device is not in the clip, and
+  Clipper's own sounds are. It follows the default when it moves.
+- **A second of audio can go missing at a device switch.** Process loopback blocks while a slow
+  device starts, and the gap is filled with silence. Measured on virtual outputs; real devices
+  here dipped rather than dropped.
 
 - **Elevated games swallow the hotkey.** `RegisterHotKey` from a normal-integrity process never
   sees keys while an admin-elevated game has focus. A low-level keyboard hook has the same

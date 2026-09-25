@@ -235,6 +235,51 @@ impl Endpoint {
         }
     }
 
+    /// Every application except Clipper, on every output, as float stereo at `rate`. See
+    /// `procloop.rs` for why this is the desktop leg's first choice.
+    ///
+    /// No keep-alive: the virtual device delivers packets through silence on its own — 29,999 of
+    /// 30,000 polls over five silent minutes — and its timestamps held to 0.007 ms of the capture
+    /// clock over the same run.
+    pub fn process_loopback(rate: u32) -> Result<Self> {
+        unsafe {
+            let client = crate::procloop::activate()?;
+            let wanted = WAVEFORMATEX {
+                wFormatTag: WAVE_FORMAT_IEEE_FLOAT,
+                nChannels: OUT_CHANNELS as u16,
+                nSamplesPerSec: rate,
+                nAvgBytesPerSec: rate * (OUT_CHANNELS as u32) * 4,
+                nBlockAlign: (OUT_CHANNELS * 4) as u16,
+                wBitsPerSample: 32,
+                cbSize: 0,
+            };
+            client.Initialize(
+                AUDCLNT_SHAREMODE_SHARED,
+                AUDCLNT_STREAMFLAGS_LOOPBACK,
+                BUFFER_HNS,
+                0,
+                &wanted,
+                None,
+            )?;
+            let capture: IAudioCaptureClient = client.GetService()?;
+            client.Start()?;
+            let format = MixFormat { sample_rate: rate, channels: OUT_CHANNELS as u16, bits: 32, float: true };
+            Ok(Endpoint {
+                _capture_client: client,
+                capture,
+                _render: None,
+                format,
+                downmix: vec![(1.0, 0.0), (0.0, 1.0)],
+                last_packet_hns: 0,
+                first_hns: None,
+                skew_hns: 0,
+                pacer: Pacer::new(rate, LOOPBACK_DEADBAND_HNS),
+                pairs: Vec::new(),
+                captured: 0,
+            })
+        }
+    }
+
     /// A capture endpoint — a microphone — resampled by the audio engine to the rate the mixer
     /// already works in.
     ///
@@ -1457,6 +1502,12 @@ impl Mixer {
     }
     pub fn desk_clock_ppm(&self) -> i64 {
         self.desktop.as_ref().map(|d| d.clock_ppm()).unwrap_or(0)
+    }
+
+    /// How the desktop leg is recording: "every app" through process loopback, or "default output"
+    /// through the endpoint fallback.
+    pub fn desk_method(&self) -> Option<&'static str> {
+        self.desktop.as_ref().map(|d| d.method())
     }
 
     /// What the desktop leg is recording, and why it is not when it is not.

@@ -35,9 +35,14 @@ pub struct DesktopConfig {
     pub keep_alive: bool,
 }
 
+/// The mix rate when process loopback sets it. The engine converts every application to it, so it
+/// is a choice rather than a property of any device, and 48 kHz is what noise suppression needs.
+const PROCESS_RATE: u32 = 48_000;
+
 /// What the worker says about itself, for `status` and the settings panel.
 #[derive(Default)]
 struct Info {
+    method: &'static str,
     name: String,
     error: Option<String>,
     rate_changed: bool,
@@ -88,6 +93,12 @@ impl Desktop {
                     info: worker_info,
                     stop: worker_stop,
                     config,
+                    // The dev hooks exercise endpoint loopback specifically: a tone through its
+                    // keep-alive, or no keep-alive at all. So does the environment switch, which is
+                    // how the fallback is tested on a machine that has the real thing.
+                    process: config.tone_hz.is_none()
+                        && config.keep_alive
+                        && std::env::var_os("CLIPPER_ENDPOINT_LOOPBACK").is_none(),
                     rate: None,
                     source: None,
                     id: String::new(),
@@ -149,6 +160,11 @@ impl Desktop {
         }
         let nominal = self.stream_frames as i64 * HNS_PER_SECOND / self.rate;
         (((nominal - span) as f64 / span as f64) * 1_000_000.0).round() as i64
+    }
+
+    /// "every app" or "default output". See `Worker::open`.
+    pub fn method(&self) -> &'static str {
+        self.info.lock().map(|i| i.method).unwrap_or("")
     }
 
     pub fn name(&self) -> String {
@@ -225,6 +241,9 @@ struct Worker {
     info: Arc<Mutex<Info>>,
     stop: Arc<AtomicBool>,
     config: DesktopConfig,
+    /// Process loopback is still worth trying. Cleared the first time it cannot be activated, which
+    /// is permanent for the machine — an older Windows — rather than something a retry fixes.
+    process: bool,
     /// The mix rate, once the first device has set it. Every device after is read at it.
     rate: Option<u32>,
     source: Option<Endpoint>,
@@ -281,7 +300,34 @@ impl Worker {
         }
     }
 
+    /// Process loopback when the machine has it, endpoint loopback on the default output otherwise.
     fn open(&mut self) -> Result<MixFormat> {
+        if self.process {
+            match Endpoint::process_loopback(self.rate.unwrap_or(PROCESS_RATE)) {
+                Ok(endpoint) => {
+                    let format = endpoint.format();
+                    let name = "every app except Clipper".to_string();
+                    log_desktop(&name, format);
+                    self.source = Some(endpoint);
+                    // No id: there is no default to follow. Every output is already in the mix.
+                    self.id = String::new();
+                    if let Ok(mut info) = self.info.lock() {
+                        info.method = "every app";
+                        info.name = name;
+                        info.error = None;
+                    }
+                    let _ = self.tx.send(Message::Stream);
+                    return Ok(format);
+                }
+                Err(e) => {
+                    crate::lifecycle::log(&format!(
+                        "process loopback unavailable ({}); recording the default output instead",
+                        e.message()
+                    ));
+                    self.process = false;
+                }
+            }
+        }
         let (endpoint, name, id) =
             Endpoint::loopback(self.config.tone_hz, self.config.keep_alive, self.rate)?;
         let format = endpoint.format();
@@ -289,6 +335,7 @@ impl Worker {
         self.source = Some(endpoint);
         self.id = id;
         if let Ok(mut info) = self.info.lock() {
+            info.method = "default output";
             info.name = name;
             info.error = None;
         }

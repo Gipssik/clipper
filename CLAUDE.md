@@ -92,8 +92,8 @@ keeps a 16px mark from looking fringed. `assets/source/` is excluded from the pa
 `assets/source/mksounds.py`, which synthesises them from sines (stdlib only) and uses ffmpeg's
 `ebur128` to set every one to the same momentary loudness, so choosing a different sound never
 changes the volume. The window plays them on `clip-saved`, not the daemon. It works hidden in the
-tray, with no user gesture. The desktop loopback records the sound like any other output, so the
-next replay contains it; excluding it would take process loopback in `audio.rs`.
+tray, with no user gesture. It never reaches a clip: desktop audio is process loopback excluding
+Clipper's process tree (`capture/src/procloop.rs`), with endpoint loopback only as a fallback.
 
 The same `assets/icon.ico` is compiled into `clipper-capture.exe` by `capture/build.rs`, along with
 a version resource. That resource is not cosmetic: `FileDescription` is what Task Manager prints in
@@ -264,6 +264,10 @@ Notes that cost time to rediscover:
 - Build fixtures with `ffmpeg-bin/ffmpeg.exe` into a scratchpad folder; never point a harness at the
   user's real clips folder for anything that writes.
 - The `Content Security Policy` warning about the Google Fonts stylesheet is pre-existing noise.
+- **Anything the harness plays is left out of the recording**, because it is in Clipper's process
+  tree, which the desktop leg excludes. A sound that has to *be* in a clip — a tone to measure — must
+  be started from the shell, outside the tree. `CLIPPER_ENDPOINT_LOOPBACK=1` forces the old
+  default-output capture, which hears everything.
 - Verifying output media: check the stream banner for codec, dimensions and colour tags; `cmp` for a
   lossless copy; `-map 0:v -c copy -f md5 -` on both sides to prove a remux kept the bitstream.
 

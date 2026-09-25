@@ -2326,19 +2326,19 @@ function renderForeground() {
 // asked for and refused. A mic that failed to open has to look different from a quiet room.
 let replayMicState = { active: false, device: '', error: null, wanted: false, peakDb: null };
 
-// Which output the desktop leg is on. It follows Windows' default, so it can change under the
-// panel — switching from speakers to a headset moves it — and the tip says where it went.
-let replayDeskState = { device: '', error: null };
+// How the desktop leg is recording. Normally every app on every output, Clipper left out; where
+// Windows cannot do that, the default output, which can change under the panel when somebody
+// switches to a headset. The tip says which, and where it went.
+let replayDeskState = { device: '', error: null, method: '' };
 
 function renderDeskTip() {
-  const base = 'Everything playing on your default output — the game, your call, music. Switch between speakers and a headset in Windows and it follows, keeping the buffer; the switch itself can cost a moment of game audio. Costs about 24 KB a second.';
   const on = replayConfig && replayConfig.audio && replayConfig.audio.desktop;
   if (on && replayDeskState.error && !replayDeskState.device) {
     replayAudioTip.textContent = `No output to record right now: ${replayDeskState.error}. Still recording everything else, and it picks up the next default on its own.`;
-  } else if (on && replayDeskState.device) {
-    replayAudioTip.textContent = `${base} Recording ${replayDeskState.device}.`;
+  } else if (on && replayDeskState.method === 'default output' && replayDeskState.device) {
+    replayAudioTip.textContent = `Everything playing on your default output, now ${replayDeskState.device}, and it follows when you switch between speakers and a headset. Windows would not record per app here, so Clipper's own sounds are included. Costs about 24 KB a second.`;
   } else {
-    replayAudioTip.textContent = base;
+    replayAudioTip.textContent = 'Everything your PC plays — the game, your call, music — on every output, speakers and headset alike. Clipper\'s own sounds stay out: the save chime and a clip you preview never end up in a recording. Costs about 24 KB a second.';
   }
 }
 
@@ -2812,7 +2812,7 @@ api.onCaptureEvent((event) => {
       };
       renderMicTip();
       // A device name with an error beside it is the leg between devices: name the error.
-      replayDeskState = { device: event.deskError ? '' : (event.deskDevice || ''), error: event.deskError || null };
+      replayDeskState = { device: event.deskError ? '' : (event.deskDevice || ''), error: event.deskError || null, method: event.deskMethod || '' };
       renderDeskTip();
       renderNoiseWarning(event.noiseError || null);
       renderForeground();

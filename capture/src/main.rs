@@ -32,6 +32,7 @@ mod record;
 mod ring;
 mod ts;
 mod monitors;
+mod procloop;
 
 #[cfg(feature = "dump")]
 mod dump;
@@ -905,6 +906,10 @@ fn cmd_daemon(args: &[String]) -> Fallible<()> {
     // available here, so this is wired up before anything else starts.
     if let Some(pid) = flag(args, "--parent-pid").and_then(|v| v.parse::<u32>().ok()) {
         lifecycle::exit_with_parent(pid);
+        // And leave Clipper out of the recording: the parent is its main process, and everything
+        // that makes a sound — the renderer's replay-saved chime, a clip playing in the grid — is
+        // under it.
+        procloop::exclude_tree(pid);
     }
 
     let config_path = flag(args, "--config")

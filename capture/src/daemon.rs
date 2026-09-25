@@ -316,7 +316,6 @@ impl Pipeline {
         }
 
         if let (Some(mixer), Some(enc)) = (&mut self.audio, &mut self.aac) {
-            mixer.pump_silence()?;
             let mut pcm = Vec::new();
             mixer.poll(&mut pcm)?;
             if !pcm.is_empty() {
@@ -394,7 +393,7 @@ impl Pipeline {
         }
         // The default output moved to a device the audio engine will not convert to the rate this
         // pipeline's encoder was built for. Every other device change is followed in place.
-        if self.audio.as_ref().is_some_and(|m| m.desk_rate_changed) {
+        if self.audio.as_ref().is_some_and(|m| m.desk_rate_changed()) {
             return Some("the audio output changed sample rate");
         }
         None
@@ -1362,8 +1361,8 @@ fn status(
         "desktopAudio": config.audio.desktop,
         // Which output the desktop leg is following right now, and why it has none when it has
         // none. It moves with Windows' default, so the panel says where it went.
-        "deskDevice": pipeline.and_then(|p| p.audio.as_ref()).map(|m| m.desk_name.clone()),
-        "deskError": pipeline.and_then(|p| p.audio.as_ref()).and_then(|m| m.desk_error.clone()),
+        "deskDevice": pipeline.and_then(|p| p.audio.as_ref()).and_then(|m| m.desk_name()),
+        "deskError": pipeline.and_then(|p| p.audio.as_ref()).and_then(|m| m.desk_error()),
         "micWanted": config.audio.mic,
         // Three separate facts, because "no voice in my clip" has three different causes and the
         // settings panel should be able to tell them apart: not asked for, asked for and running,

@@ -47,7 +47,7 @@ const WAVE_FORMAT_EXTENSIBLE: u16 = 0xFFFE;
 /// scheduling hiccup cannot lose samples.
 const BUFFER_HNS: i64 = 1_000_000;
 
-const HNS_PER_SECOND: i64 = 10_000_000;
+pub(crate) const HNS_PER_SECOND: i64 = 10_000_000;
 
 /// Everything downstream works in this format: the AAC encoder wants 16-bit PCM, and stereo is
 /// what a game clip needs.
@@ -73,7 +73,7 @@ const DROPOUT_HNS: i64 = HNS_PER_SECOND / 20;
 /// at ±0.02 ms of packet jitter and 1 ppm of drift — and inside it the samples go through bit for
 /// bit, exactly as they did before any of this existed. It is also far inside what anybody can see
 /// as lip sync, so a jittery device can wander around in it without costing anything.
-const LOOPBACK_DEADBAND_HNS: i64 = HNS_PER_SECOND / 100;
+pub(crate) const LOOPBACK_DEADBAND_HNS: i64 = HNS_PER_SECOND / 100;
 
 #[derive(Clone, Copy, serde::Serialize)]
 pub struct MixFormat {
@@ -390,12 +390,6 @@ impl Endpoint {
         self.pacer.position_hns()
     }
 
-    /// Carries on a timeline an earlier endpoint started, so this one's samples land where they
-    /// belong rather than straight after the last sample the old one delivered. See `Pacer::resume`.
-    pub fn resume_at(&mut self, hns: i64) {
-        self.pacer.resume(hns);
-    }
-
     /// The rate correction currently being applied, as a ratio: exactly 1.0 for a device that is
     /// keeping time. Reported, because a device silently running half a percent slow is the sort
     /// of thing worth being able to see.
@@ -405,6 +399,24 @@ impl Endpoint {
 
     /// Appends interleaved stereo 16-bit samples for everything the endpoint has ready.
     pub fn poll(&mut self, out: &mut Vec<i16>) -> Result<PollStats> {
+        let mut pacer = std::mem::replace(&mut self.pacer, Pacer::new(1, 0));
+        let mut filled = 0;
+        let result = self.read(|hns, pairs, discontinuity| {
+            filled += pacer.packet(hns, pairs, discontinuity, out);
+        });
+        self.pacer = pacer;
+        let mut stats = result?;
+        stats.filled_frames = filled;
+        Ok(stats)
+    }
+
+    /// Everything the endpoint has ready, one packet at a time, as its timestamp on the capture
+    /// clock, its frames folded to stereo, and whether the device flagged samples lost before it.
+    ///
+    /// The raw half of `poll`, without the pacer. The desktop leg reads on a thread of its own and
+    /// paces on the tick, because opening and reading a device can block for a second and the
+    /// tick is also what drives the video.
+    pub fn read(&mut self, mut packet: impl FnMut(i64, &[[f32; 2]], bool)) -> Result<PollStats> {
         let mut stats = PollStats::default();
         let rate = self.format.sample_rate as i64;
 
@@ -451,7 +463,7 @@ impl Endpoint {
             let mut pairs = std::mem::take(&mut self.pairs);
             pairs.clear();
             self.decode_pairs(data, frames, silent, &mut pairs);
-            stats.filled_frames += self.pacer.packet(packet_hns, &pairs, discontinuity, out);
+            packet(packet_hns, &pairs, discontinuity);
             self.pairs = pairs;
 
             stats.captured_frames += frames as u64;
@@ -524,7 +536,7 @@ impl Endpoint {
 /// Both legs now share this. They differ only in the deadband: how far out the device may sit
 /// before it is corrected at all. Inside it the ratio is exactly one and the samples pass through
 /// bit for bit, which is what keeps a healthy desktop leg identical to what it always was.
-struct Pacer {
+pub(crate) struct Pacer {
     rate: i64,
     deadband_hns: i64,
     /// Where the first sample belongs. `None` before the first packet.
@@ -538,13 +550,13 @@ struct Pacer {
     input: Vec<[f32; 2]>,
     pos: f64,
     /// The correction currently being applied, as a ratio of output frames to input frames.
-    ratio: f64,
+    pub(crate) ratio: f64,
     /// Set by `resume` until the first packet arrives. See there.
     resuming: bool,
 }
 
 impl Pacer {
-    fn new(rate: u32, deadband_hns: i64) -> Pacer {
+    pub(crate) fn new(rate: u32, deadband_hns: i64) -> Pacer {
         Pacer {
             rate: rate as i64,
             deadband_hns,
@@ -566,20 +578,47 @@ impl Pacer {
     /// hole like any other and is filled. The one thing a hole never is, overlap, is handled once
     /// here: a first packet stamped before `hns` loses the part that is already on the timeline,
     /// rather than the rate matching spending seconds working it back off at one percent.
-    fn resume(&mut self, hns: i64) {
+    ///
+    /// The rate matching starts over too: it was measuring the old device's clock.
+    pub(crate) fn resume(&mut self, hns: i64) {
         self.base = Some(hns);
         self.emitted = 0;
+        self.ratio = 1.0;
+        self.input = vec![[0.0; 2]];
+        self.pos = 1.0;
         self.resuming = true;
     }
 
-    fn position_hns(&self) -> Option<i64> {
+    /// Silence up to `hns`, for a source that has stopped delivering: a device between one default
+    /// and the next, or a read blocked while a device starts. The track keeps pace with the video
+    /// rather than stalling and then arriving all at once, and whatever the source hands over
+    /// late for the stretch already covered is trimmed, exactly as after `resume`.
+    pub(crate) fn pad_to(&mut self, hns: i64, out: &mut Vec<i16>) -> u64 {
+        let Some(position) = self.position_hns() else { return 0 };
+        let frames = (hns - position) * self.rate / HNS_PER_SECOND;
+        if frames <= 0 {
+            return 0;
+        }
+        out.extend(std::iter::repeat(0).take(frames as usize * OUT_CHANNELS));
+        let at = position + frames * HNS_PER_SECOND / self.rate;
+        // The frames the resampler held back belong before the silence; two of them are not
+        // worth reordering the stream for.
+        self.input = vec![[0.0; 2]];
+        self.pos = 1.0;
+        self.base = Some(at);
+        self.emitted = 0;
+        self.resuming = true;
+        frames as u64
+    }
+
+    pub(crate) fn position_hns(&self) -> Option<i64> {
         self.base
             .map(|base| base + self.emitted as i64 * HNS_PER_SECOND / self.rate)
     }
 
     /// Places one packet on the timeline and appends whatever can be emitted, as interleaved 16-bit
     /// stereo. Returns the frames of silence that had to be invented in front of it.
-    fn packet(
+    pub(crate) fn packet(
         &mut self,
         packet_hns: i64,
         samples: &[[f32; 2]],
@@ -788,7 +827,7 @@ unsafe fn write_sample(data: *mut u8, format: MixFormat, index: usize, value: f3
     }
 }
 
-fn read_format(wave: *const WAVEFORMATEX) -> MixFormat {
+pub(crate) fn read_format(wave: *const WAVEFORMATEX) -> MixFormat {
     unsafe {
         let base = &*wave;
         let mut float = base.wFormatTag == WAVE_FORMAT_IEEE_FLOAT;
@@ -974,7 +1013,7 @@ pub fn input_devices() -> Vec<InputDevice> {
 
 /// A PWSTR from an endpoint, copied out and freed. `GetId` allocates with the COM task allocator
 /// and the caller owns it.
-fn unsafe_string(ptr: windows::core::PWSTR) -> String {
+pub(crate) fn unsafe_string(ptr: windows::core::PWSTR) -> String {
     unsafe {
         let text = ptr.to_string().unwrap_or_default();
         windows::Win32::System::Com::CoTaskMemFree(Some(ptr.0 as *const _));
@@ -1006,7 +1045,7 @@ fn friendly_name(device: &IMMDevice) -> String {
 /// application — would otherwise stall the whole audio track and, through it, the clip. Past this
 /// much lag the mixer gives up on the laggard for that round, fills its share with silence, and
 /// carries on.
-const MAX_LAG_HNS: i64 = HNS_PER_SECOND / 5;
+pub(crate) const MAX_LAG_HNS: i64 = HNS_PER_SECOND / 5;
 
 /// How often to try a microphone that went away. Headsets get unplugged mid-session and plugged
 /// back in, and the recorder is supposed to still be recording when that happens.
@@ -1017,11 +1056,11 @@ const MIC_RETRY_HNS: i64 = 3 * HNS_PER_SECOND;
 /// enumerator, which is a lookup inside the process, and what the interval trades is the silence
 /// after somebody switches devices: measured at up to 750 ms of lost game audio when this was a
 /// second, most of it spent waiting to look.
-const DEFAULT_CHECK_HNS: i64 = HNS_PER_SECOND / 4;
+pub(crate) const DEFAULT_CHECK_HNS: i64 = HNS_PER_SECOND / 4;
 
 /// How often to try again when the desktop leg has no device. Shorter than the microphone's,
 /// because an output going away almost always means Windows has already picked the next one.
-const DESK_RETRY_HNS: i64 = HNS_PER_SECOND;
+pub(crate) const DESK_RETRY_HNS: i64 = HNS_PER_SECOND;
 
 /// What one source has delivered but the mix has not yet emitted.
 #[derive(Default)]
@@ -1115,29 +1154,9 @@ impl Track {
 
 /// Desktop and microphone, summed into the one stereo track the encoder takes.
 pub struct Mixer {
-    desktop: Option<Endpoint>,
-    /// The desktop leg follows Windows' default output, the way a microphone left on "default"
-    /// follows the default input. Opening the default once and holding it was the bug: switching
-    /// from speakers to a headset leaves the speakers present, so the stream on them never fails —
-    /// it just goes quiet, and every clip after the switch has no game in it.
-    ///
-    /// `desk_wanted` is the setting; `desktop` being `None` with it set means between devices.
-    desk_wanted: bool,
-    desk_id: String,
-    desk_default_check_hns: i64,
-    desk_retry_hns: i64,
-    /// Where the desktop timeline had got to when its device went: the next desktop sample belongs
-    /// here. Only the pass-through path uses it, and it keeps it moving on the clock while there
-    /// is no device; the mixed path lines everything up by timestamp anyway.
-    desk_resume_hns: Option<i64>,
-    tone_hz: Option<f32>,
-    keep_alive: bool,
-    /// What the desktop leg is recording, and why it is not when it is not.
-    pub desk_name: String,
-    pub desk_error: Option<String>,
-    /// The new default cannot be brought to the rate the pipeline was built for. Nothing short of
-    /// a rebuild fixes that, and the daemon does one when it sees this.
-    pub desk_rate_changed: bool,
+    /// The desktop leg, read on a thread of its own and paced here. See `desktop.rs`: it follows
+    /// Windows' default output, and nothing it does to get there can hold the video up.
+    desktop: Option<crate::desktop::Desktop>,
     mic: Option<Endpoint>,
     /// Set when a microphone was asked for. Deliberately separate from `mic` being present: a mic
     /// that failed to open is something to report and retry, not something to forget.
@@ -1252,13 +1271,13 @@ impl Mixer {
             tone_hz,
             keep_alive,
         } = config;
-        let desk_wanted = desktop;
-        let (desktop, desk_name, desk_id) = if desktop {
-            let (endpoint, name, id) = Endpoint::loopback(tone_hz, keep_alive, None)?;
-            log_desktop(&name, endpoint.format());
-            (Some(endpoint), name, id)
+        let desktop = if desktop {
+            Some(crate::desktop::Desktop::start(crate::desktop::DesktopConfig {
+                tone_hz,
+                keep_alive,
+            })?)
         } else {
-            (None, String::new(), String::new())
+            None
         };
         // The desktop endpoint's own rate is the mix rate whenever there is one, so the common path
         // converts nothing. Without it, 48 kHz — what essentially every endpoint runs at, and what
@@ -1270,16 +1289,6 @@ impl Mixer {
 
         let mut mixer = Mixer {
             desktop,
-            desk_wanted,
-            desk_id,
-            desk_default_check_hns: 0,
-            desk_retry_hns: 0,
-            desk_resume_hns: None,
-            tone_hz,
-            keep_alive,
-            desk_name,
-            desk_error: None,
-            desk_rate_changed: false,
             mic: None,
             mic_wanted: mic,
             mic_request: mic_device.to_string(),
@@ -1450,122 +1459,18 @@ impl Mixer {
         self.desktop.as_ref().map(|d| d.clock_ppm()).unwrap_or(0)
     }
 
-    /// Feeds the keep-alive stream. A device that has gone away fails here first, and that is the
-    /// desktop leg losing its device, not the pipeline failing: it is dropped and reopened on
-    /// whatever is the default now.
-    pub fn pump_silence(&mut self) -> Result<()> {
-        let failed = match &mut self.desktop {
-            Some(d) => d.pump_silence().err(),
-            None => None,
-        };
-        if let Some(e) = failed {
-            self.lose_desktop(now_hns(), &e);
-        }
-        Ok(())
+    /// What the desktop leg is recording, and why it is not when it is not.
+    pub fn desk_name(&self) -> Option<String> {
+        self.desktop.as_ref().map(|d| d.name())
+    }
+    pub fn desk_error(&self) -> Option<String> {
+        self.desktop.as_ref().and_then(|d| d.error())
     }
 
-    /// Keeps the desktop leg on the device Windows currently calls the default output. Called at
-    /// the top of every poll; does real work once a second, or when there is no device at all.
-    fn follow_desktop(&mut self, now: i64) {
-        if !self.desk_wanted {
-            return;
-        }
-        // An id that could not be read would never match, and the leg would reopen every second.
-        if self.desktop.is_some() && !self.desk_id.is_empty() && now >= self.desk_default_check_hns
-        {
-            self.desk_default_check_hns = now + DEFAULT_CHECK_HNS;
-            if let Some(default) = self.default_id(eRender) {
-                if default != self.desk_id {
-                    crate::lifecycle::log(&format!(
-                        "desktop audio: system default moved away from {}",
-                        self.desk_name
-                    ));
-                    self.drop_desktop();
-                    self.desk_retry_hns = now;
-                }
-            }
-        }
-        if self.desktop.is_none() && now >= self.desk_retry_hns {
-            self.desk_retry_hns = now + DESK_RETRY_HNS;
-            self.open_desktop();
-        }
-    }
-
-    fn open_desktop(&mut self) {
-        match Endpoint::loopback(self.tone_hz, self.keep_alive, Some(self.rate)) {
-            Ok((mut endpoint, name, id)) => {
-                log_desktop(&name, endpoint.format());
-                if !self.mic_wanted {
-                    if let Some(at) = self.desk_resume_hns {
-                        endpoint.resume_at(at);
-                    }
-                }
-                self.desktop = Some(endpoint);
-                self.desk_name = name;
-                self.desk_id = id;
-                self.desk_error = None;
-                self.desk = Track::default();
-            }
-            Err(e) => {
-                let message = e.message().to_string();
-                if self.desk_error.as_deref() != Some(message.as_str()) {
-                    crate::lifecycle::log(&format!("desktop audio unavailable: {message}"));
-                }
-                self.desk_error = Some(message);
-                if self.default_output_rate().is_some_and(|rate| rate != self.rate) {
-                    self.desk_rate_changed = true;
-                }
-            }
-        }
-    }
-
-    /// Lets go of the desktop device, remembering where its timeline had got to.
-    fn drop_desktop(&mut self) {
-        if let Some(position) = self.desktop.take().and_then(|d| d.position_hns()) {
-            self.desk_resume_hns = Some(position);
-        }
-        // The track assumes its samples are contiguous, and the next device's will not follow on
-        // from these. Starting it over is what lets it line the new ones up by their timestamps.
-        self.desk = Track::default();
-    }
-
-    /// The device errored — unplugged, disabled, or taken by an exclusive-mode application. The
-    /// recording carries on without it and the next poll tries whatever is the default now.
-    fn lose_desktop(&mut self, now: i64, e: &windows::core::Error) {
-        crate::lifecycle::log(&format!("desktop audio stopped: {}", e.message()));
-        self.desk_error = Some(e.message().to_string());
-        self.drop_desktop();
-        self.desk_retry_hns = now;
-    }
-
-    /// Silence on the pass-through path for as long as there is no desktop device, so the track
-    /// keeps pace with the video instead of stalling and then arriving all at once. Held back from
-    /// the present by the same margin the mixer allows a late source, so a device that opens a
-    /// moment later lands after it rather than on top of it.
-    fn desk_silence(&mut self, now: i64, out: &mut Vec<i16>) -> u64 {
-        let Some(at) = self.desk_resume_hns else { return 0 };
-        let rate = self.rate as i64;
-        let frames = ((now - MAX_LAG_HNS - at).max(0) * rate / HNS_PER_SECOND) as usize;
-        if frames == 0 {
-            return 0;
-        }
-        out.extend(std::iter::repeat(0).take(frames * OUT_CHANNELS));
-        let end = at + frames as i64 * HNS_PER_SECOND / rate;
-        self.desk_resume_hns = Some(end);
-        self.last_packet_hns = end;
-        frames as u64
-    }
-
-    /// The sample rate of whatever Windows calls the default output now.
-    fn default_output_rate(&mut self) -> Option<u32> {
-        unsafe {
-            let device = self.enumerator()?.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
-            let client: IAudioClient = device.Activate(CLSCTX_ALL, None).ok()?;
-            let wave = client.GetMixFormat().ok()?;
-            let rate = read_format(wave).sample_rate;
-            windows::Win32::System::Com::CoTaskMemFree(Some(wave as *const _));
-            Some(rate)
-        }
+    /// The default output moved to a device the audio engine will not convert to the rate this
+    /// mix was built at. Nothing short of a rebuild fixes that, and the daemon does one.
+    pub fn desk_rate_changed(&self) -> bool {
+        self.desktop.as_ref().is_some_and(|d| d.rate_changed())
     }
 
     fn enumerator(&mut self) -> Option<&IMMDeviceEnumerator> {
@@ -1625,23 +1530,14 @@ impl Mixer {
     /// Appends everything both sources have ready, summed, as interleaved stereo.
     pub fn poll(&mut self, out: &mut Vec<i16>) -> Result<PollStats> {
         let now = now_hns();
-        self.follow_desktop(now);
 
         // With no microphone asked for there is nothing to align, so the desktop stream goes
         // straight through — the same path, byte for byte, that this had before mixing existed.
         if !self.mic_wanted {
             let Some(desktop) = &mut self.desktop else {
-                let filled = self.desk_silence(now, out);
-                self.desk_stats.filled_frames += filled;
-                return Ok(PollStats { filled_frames: filled, ..PollStats::default() });
+                return Ok(PollStats::default());
             };
-            let stats = match desktop.poll(out) {
-                Ok(stats) => stats,
-                Err(e) => {
-                    self.lose_desktop(now, &e);
-                    return Ok(PollStats::default());
-                }
-            };
+            let stats = desktop.poll(out)?;
             self.desk_stats.add(&stats);
             if self.first_hns.is_none() {
                 self.first_hns = desktop.first_hns;
@@ -1682,13 +1578,7 @@ impl Mixer {
         let rate = self.rate as i64;
 
         let mut scratch = std::mem::take(&mut self.scratch_pcm);
-        let desk_stats = match drain_into(&mut self.desktop, &mut self.desk, &mut scratch, None) {
-            Ok(desk_stats) => desk_stats,
-            Err(e) => {
-                self.lose_desktop(now, &e);
-                PollStats::default()
-            }
-        };
+        let desk_stats = drain_into(&mut self.desktop, &mut self.desk, &mut scratch, None)?;
         stats.add(&desk_stats);
         self.desk_stats.add(&desk_stats);
 
@@ -1742,12 +1632,6 @@ impl Mixer {
             } else {
                 limit = limit.min(end);
             }
-        }
-        // Nothing is delivering: the desktop is between devices and there is no microphone to
-        // wait for. The clock sets the pace, so the track keeps up with the video in silence
-        // rather than stalling and arriving all at once when a device turns up.
-        if limit == i64::MAX && self.desk_wanted && self.desktop.is_none() {
-            limit = now - MAX_LAG_HNS;
         }
         if limit == i64::MAX || limit <= out_hns {
             return Ok(stats);
@@ -1804,11 +1688,11 @@ impl Mixer {
     }
 }
 
-fn now_hns() -> i64 {
+pub(crate) fn now_hns() -> i64 {
     crate::clock::qpc_to_hns(crate::clock::qpc_now(), crate::clock::qpc_frequency())
 }
 
-fn log_desktop(name: &str, format: MixFormat) {
+pub(crate) fn log_desktop(name: &str, format: MixFormat) {
     crate::lifecycle::log(&format!(
         "desktop audio: {name} ({} Hz, {} ch, {}-bit{})",
         format.sample_rate,
@@ -1824,8 +1708,39 @@ fn log_desktop(name: &str, format: MixFormat) {
 /// sample with what the endpoint delivered but arrives later. The track is therefore started at
 /// the timestamp of the first sample the *endpoint* produced, remembered in `noise_origin`, and not
 /// at wherever the endpoint had got to by the time the suppressor had a frame ready.
-fn drain_into(
-    endpoint: &mut Option<Endpoint>,
+/// A source the mix can drain: a device read on the tick, or the desktop leg's worker.
+trait Leg {
+    fn position_hns(&self) -> Option<i64>;
+    fn first_hns(&self) -> Option<i64>;
+    fn poll(&mut self, out: &mut Vec<i16>) -> Result<PollStats>;
+}
+
+impl Leg for Endpoint {
+    fn position_hns(&self) -> Option<i64> {
+        Endpoint::position_hns(self)
+    }
+    fn first_hns(&self) -> Option<i64> {
+        self.first_hns
+    }
+    fn poll(&mut self, out: &mut Vec<i16>) -> Result<PollStats> {
+        Endpoint::poll(self, out)
+    }
+}
+
+impl Leg for crate::desktop::Desktop {
+    fn position_hns(&self) -> Option<i64> {
+        crate::desktop::Desktop::position_hns(self)
+    }
+    fn first_hns(&self) -> Option<i64> {
+        self.first_hns
+    }
+    fn poll(&mut self, out: &mut Vec<i16>) -> Result<PollStats> {
+        crate::desktop::Desktop::poll(self, out)
+    }
+}
+
+fn drain_into<L: Leg>(
+    endpoint: &mut Option<L>,
     track: &mut Track,
     scratch: &mut Vec<i16>,
     noise: Option<(&mut crate::denoise::Suppressor, &mut Option<i64>)>,
@@ -1843,7 +1758,7 @@ fn drain_into(
     if scratch.is_empty() {
         return Ok(stats);
     }
-    let mut origin = at.or(endpoint.first_hns);
+    let mut origin = at.or(endpoint.first_hns());
     if let Some((noise, noise_origin)) = noise {
         if noise_origin.is_none() {
             *noise_origin = origin;

@@ -24,6 +24,7 @@ mod lifecycle;
 mod convert;
 mod d3d;
 mod denoise;
+mod desktop;
 mod display;
 mod encoder;
 mod hotkey;
@@ -659,7 +660,6 @@ fn cmd_audio(args: &[String]) -> Fallible<()> {
 
     while clock::qpc_to_ms(clock::qpc_now() - started, freq) < seconds * 1000.0 {
         ticker.wait();
-        loopback.pump_silence()?;
 
         let mut pcm = Vec::new();
         let stats = loopback.poll(&mut pcm)?;

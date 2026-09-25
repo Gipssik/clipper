@@ -1117,12 +1117,22 @@ anything to see either. Reproduced by moving the default between two virtual out
 `clipper-capture audio --wav` ran: the shipped build recorded **5.0 s of digital silence** for the
 five seconds the default was elsewhere, with whatever was playing still audible on the new device.
 
-The desktop leg now does what the microphone left on "default" already did. Every 250 ms the mixer
-asks for the default render endpoint's id. When the id moves, the old stream and its keep-alive are
-dropped and the new default is opened on the same poll. An error from the device, whether in
-`poll` or in the keep-alive's `pump`, is handled the same way: the leg is dropped and the default is
-retried every second. Before this, that error propagated and cost a pipeline rebuild after thirty
-ticks. The ring, the video and the microphone are not touched either way.
+The desktop leg now does what the microphone left on "default" already did. Every 250 ms it asks
+for the default render endpoint's id. When the id moves, the old stream and its keep-alive are
+dropped and the new default is opened straight away. An error from the device, whether in a read or
+in the keep-alive's `pump`, is handled the same way: the leg is dropped and the default is retried
+every second. Before this, that error propagated and cost a pipeline rebuild after thirty ticks.
+The ring, the video and the microphone are not touched either way.
+
+**All of that happens on a thread of its own** (`desktop.rs`), which the first version of this fix
+did not do. Opening a loopback is not quick — 210 ms on this machine's Realtek speakers, 15 ms on
+one virtual output and 1,020 ms on another — and the tick that polled audio is the one that captures
+and encodes the video. Through the whole pipeline, switching from the Audeze headset back to the
+speakers left a **40 ms hole in the video**, two frames, and the slow device would have cost a
+second. A worker now owns the device: it opens it, pumps its keep-alive, watches the default and
+reads packets, and hands them over a channel. The same switch through the worker leaves every frame
+16.7 ms apart. The microphone still opens on the tick, as it always has; it only does so when the
+default input moves or a lost mic comes back.
 
 **The new device's samples have to land at their own time.** On the pass-through path, with no
 microphone, a fresh `Pacer` would start its timeline at its first packet. The new device's audio
@@ -1130,10 +1140,13 @@ would then follow straight on from the old one's, the gap would vanish from the 
 after a switch would have its audio early by however long the switch took. So the new pacer is
 *resumed* at the old one's position (`Pacer::resume`). The gap becomes a hole like any other and is
 filled, and a first packet stamped before the handover is trimmed rather than stretched back over
-seconds at one percent. While there is no device at all, the pass-through path emits silence on the
-clock, 200 ms behind the present, so the track keeps pace with the video instead of stalling and
-arriving all at once. The mixed path needed less: it already lines each track up by timestamp, so the
-desktop track starts over, and the mix falls back to the clock only when no source is delivering.
+seconds at one percent. The pacer lives on the tick, not with the device, so it outlasts every
+device the worker goes through. Whenever the worker has fallen more than 200 ms behind the present —
+between devices, or blocked inside a driver — the tick pads the track with silence up to that point
+(`Pacer::pad_to`), so the track keeps pace with the video instead of stalling and then pushing a
+second of audio into the encoder at once. Whatever the worker hands over late for a stretch already
+padded is trimmed the same way as after a resume. Because the desktop track is continuous across
+devices this way, the mixed path needs nothing extra.
 
 **Rate.** A device at a different rate from the mix is opened through the audio engine's converter
 (`AUTOCONVERTPCM`, as the microphone does), which works in loopback as well: a 48 kHz endpoint read

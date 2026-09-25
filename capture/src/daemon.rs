@@ -565,7 +565,7 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
             last_heartbeat = elapsed;
             if let Some(p) = &pipeline {
                 crate::lifecycle::log(&format!(
-                    "heartbeat: {:.0}s recorded {} frames at {:.1} fps, {} dropped, {} missed ticks, {} segments, audio {:+.0} ms{}",
+                    "heartbeat: {:.0}s recorded {} frames at {:.1} fps, {} dropped, {} missed ticks, {} segments, audio {:+.0} ms{}{}",
                     elapsed,
                     p.video_packets,
                     p.measured_fps(),
@@ -573,6 +573,18 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
                     p.ticker.missed,
                     p.ring.as_ref().map_or(0, |r| r.segments_written),
                     p.audio_offset_ms().unwrap_or(0.0),
+                    // Only when there is something to say: a healthy desktop leg reads 0 ppm and
+                    // nothing filled, and a log that repeats that every minute is one nobody reads.
+                    p.audio
+                        .as_ref()
+                        .filter(|m| m.desk_clock_ppm().abs() > 50 || m.desk_stats.filled_frames > 0)
+                        .map(|m| format!(
+                            ", desktop clock {:+} ppm, corrected {:+} ppm, {} frames filled",
+                            m.desk_clock_ppm(),
+                            m.desk_rate_ppm(),
+                            m.desk_stats.filled_frames
+                        ))
+                        .unwrap_or_default(),
                     recording
                         .as_ref()
                         .map(|r| format!(", recording {} s, {} MB", r.duration_ms() / 1000, r.bytes / 1_000_000))
@@ -1361,6 +1373,12 @@ fn status(
         "micFilled": pipeline.and_then(|p| p.audio.as_ref()).map(|m| m.mic_stats.filled_frames),
         "micClockPpm": pipeline.and_then(|p| p.audio.as_ref()).map(|m| m.mic_clock_ppm()),
         "micRatePpm": pipeline.and_then(|p| p.audio.as_ref()).map(|m| m.mic_rate_ppm()),
+        // The desktop leg's equivalents. A render endpoint that keeps time reads 0 on all three;
+        // one that does not — a USB or wireless headset, a virtual mixer — is what crackling game
+        // audio was, and these are how to tell it from anything else on somebody else's machine.
+        "deskFilled": pipeline.and_then(|p| p.audio.as_ref()).map(|m| m.desk_stats.filled_frames),
+        "deskClockPpm": pipeline.and_then(|p| p.audio.as_ref()).map(|m| m.desk_clock_ppm()),
+        "deskRatePpm": pipeline.and_then(|p| p.audio.as_ref()).map(|m| m.desk_rate_ppm()),
         "micGainDb": config.audio.mic_gain_db,
         "noiseActive": pipeline.and_then(|p| p.audio.as_ref()).map(|m| m.noise_active()),
         "noiseError": pipeline.and_then(|p| p.audio.as_ref()).and_then(|m| m.noise_error.clone()),

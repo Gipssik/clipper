@@ -191,9 +191,9 @@ block on any of this, so the game does not stutter while a clip is written.
 
 **Audio.** WASAPI loopback on the default render endpoint, polled rather than event-driven —
 loopback does not support event callbacks. Loopback delivers nothing while no audio is playing, so
-we also open a silent render stream to keep the engine pumping, and fill any residual gap from the
-device's own QPC timestamps — otherwise the audio track ends up shorter than the video by exactly
-the length of every silence. The
+we also open a silent render stream to keep the engine pumping, and fill any real residual gap from
+the device's own QPC timestamps — otherwise the audio track ends up shorter than the video by
+exactly the length of every silence. *Real* is load-bearing: see what the desktop audio corrected. The
 endpoint's mix format is whatever the user's device says (often 48 kHz float32 stereo, but 44.1,
 96 kHz and 7.1 all happen in the wild), and the AAC MFT wants 16-bit PCM stereo at 44.1 or 48 kHz,
 so there is a convert/downmix/resample step — use `CLSID_CResamplerMediaObject` rather than writing
@@ -312,12 +312,15 @@ disturbs the ring, and it shares the microphone with a running daemon, as shared
 allows. It stops on a line on stdin or at end of input, so an app that dies mid-test cannot leave
 it listening, and prints a level line ten times a second for the panel's meter.
 
-**The microphone's clock is not our clock.** A USB microphone free-runs, and its packet timestamps
-jitter either side of where a sample count says they should be. The loopback leg covers a gap with
-silence, which is right for an engine that stopped and badly wrong for a device that is merely
-keeping its own time — see what the microphone corrected, below. The mic leg is instead rate
-matched: the error between the device's timeline and ours drives a first-order loop that resamples
-by a fraction of a percent, and silence is kept for gaps past 50 ms, where it is a real hole.
+**Neither device's clock is our clock.** A USB microphone free-runs, and its packet timestamps
+jitter either side of where a sample count says they should be; so, on some machines, do a render
+endpoint's. Silence is right for an engine that stopped and badly wrong for a device that is merely
+keeping its own time — see what the microphone corrected, below. Both legs are therefore rate
+matched by the same `Pacer`: the error between the device's timeline and ours drives a first-order
+loop that resamples by a fraction of a percent, and silence is kept for gaps past 50 ms, or for a
+packet flagged `DATA_DISCONTINUITY`, where it is a real hole. They differ in one number. The mic has
+no deadband. The desktop leg has 10 ms, inside which the ratio is exactly one and the samples pass
+through bit for bit — which is where a render endpoint that keeps time always sits.
 
 **No converter in the path when there is nothing to convert.** The mic is opened at the endpoint's
 own format whenever its rate already matches the mix, which is almost always — `AUTOCONVERTPCM` has
@@ -999,9 +1002,10 @@ straight line, and a windowed-sinc kernel would buy nothing audible for a great 
 arithmetic. Silence is still the answer past 50 ms, because past 50 ms it is a real hole.
 
 Measured after: **filled frames 0**, drift 0.01 ms over twenty seconds, and a fresh recording with
-**0 discontinuity events** against 163 in the clip that was sent. The loopback leg keeps the old
-path untouched, because it does not have the problem — its clock matches the capture clock to
-within 7 parts per million, where the microphone's is a few hundred.
+**0 discontinuity events** against 163 in the clip that was sent. The loopback leg kept the old
+path, on the grounds that it did not have the problem — its clock matches the capture clock to
+within 7 parts per million, where the microphone's is a few hundred. That was true of this machine.
+It turned out not to be true of every machine: see the next section.
 
 Two more faults came out of going looking, neither of them the cause, both worth fixing:
 
@@ -1029,6 +1033,36 @@ every counter this section leans on had to be added before any of it could be se
 right for another**: the gap filler was correct code applied to a device it was never designed for.
 And **a hypothesis that survives only because it has not been measured is not evidence** — the
 limiter was built on a clipping theory that a single look at the clip's peak level disproved.
+
+## What the desktop audio corrected
+
+Reported, after the microphone fix, as the same thing in the other leg: "the desktop sound on the
+clip is crackling sometimes", on a different machine from the one that had the mic problem.
+
+**The loopback leg still had the rule the microphone had lost.** Any packet stamped more than half a
+millisecond later than the previous one ended got silence in front of it. On this machine that rule
+never fires: loopback packet timestamps scatter by **±0.02 ms** and filled frames read 0. It is
+only safe on an endpoint that keeps time that precisely, and nothing promises that every render
+endpoint does — a USB or wireless headset has a crystal of its own, and a virtual mixer between the
+game and the speakers has a scheduler of its own. Which is also why it could not be heard here. A render endpoint that jitters by a few milliseconds gets the
+microphone's crackle in the game audio: in the unit test fixture, ±3 ms of jitter trips the old rule
+on well over five hundred packets in twenty seconds. The old rule also looked only from one packet
+to the next, so a render endpoint on a crystal of its own never tripped it at all and simply let
+the game audio slide against the video.
+
+Both legs now go through one `Pacer`, which tells jitter, drift and holes apart and answers each
+differently. The desktop leg's 10 ms deadband is what keeps this a change for the machines that had
+the problem and nobody else: inside it the ratio is exactly one and the output is bit-identical to
+what the old path produced, which `cargo test` holds it to. Past it, the resampler is **cubic**
+rather than the microphone's old linear one. Game audio is not speech: linear interpolation halfway
+between two samples is 3 dB down at 12 kHz, and as the read position slides through each sample
+that dulling comes and goes several times a second. Cubic holds it to 1 dB.
+
+`status` gains `deskFilled`, `deskClockPpm` and `deskRatePpm`, and the heartbeat line in
+`capture.log` carries the desktop clock whenever it is more than 50 ppm out or anything was filled.
+Before this, a desktop leg in trouble left no trace anywhere a user could send. It is also the
+evidence this section is still missing: the fix follows from the mechanism and the fixture, not yet
+from a clip or a log off the machine that had it.
 
 ## What the bitrates corrected
 

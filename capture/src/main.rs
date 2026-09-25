@@ -663,10 +663,7 @@ fn cmd_audio(args: &[String]) -> Fallible<()> {
 
         let mut pcm = Vec::new();
         let stats = loopback.poll(&mut pcm)?;
-        totals.captured_frames += stats.captured_frames;
-        totals.filled_frames += stats.filled_frames;
-        totals.silent_packets += stats.silent_packets;
-        totals.discontinuities += stats.discontinuities;
+        totals.add(&stats);
 
         if pcm.is_empty() {
             continue;
@@ -743,6 +740,8 @@ fn cmd_audio(args: &[String]) -> Fallible<()> {
         "micClockPpm": loopback.mic_clock_ppm(),
         "micPeakDb": loopback.mic_peak_db().map(|v| round2(v as f64)),
         "deskClockPpm": loopback.desk_clock_ppm(),
+        "deskRatePpm": loopback.desk_rate_ppm(),
+        "deskFilled": loopback.desk_stats.filled_frames,
         "micStats": loopback.mic_stats,
         "micPadded": loopback.mic_padded(),
         "micDropped": loopback.mic_dropped(),

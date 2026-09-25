@@ -18,8 +18,10 @@
 //!
 //! 1. A render stream on the same endpoint, writing silence. The engine then never stops, so
 //!    loopback keeps delivering. This is the standard fix and it costs nothing audible.
-//! 2. Gap detection from the device's own QPC timestamps. If a gap appears anyway — a format
-//!    change, a stall, the engine restarting — we insert exactly enough silence to cover it.
+//! 2. Gap detection from the device's own QPC timestamps. If a real gap appears anyway — the
+//!    engine restarting, a device that overran and says so — we insert exactly enough silence to
+//!    cover it. Only a real one: timestamps that merely jitter, or a device on a clock of its own,
+//!    are a different problem with a different answer, and `Pacer` is where the difference is made.
 //!
 //! **Timestamps come from the device, not from us.** `GetBuffer` hands back the QPC position the
 //! first sample of each packet was captured at, in the same 100 ns units the video leg uses. That
@@ -64,6 +66,15 @@ const RATE_MATCH_MAX: f64 = 0.01;
 /// to put in it.
 const DROPOUT_HNS: i64 = HNS_PER_SECOND / 20;
 
+/// How far the desktop leg may sit from its own timestamps before anything is done about it.
+///
+/// Zero for a microphone, whose clock is always somewhere else and always being pulled back. Ten
+/// milliseconds for loopback, because a healthy render endpoint never gets near it — measured here
+/// at ±0.02 ms of packet jitter and 1 ppm of drift — and inside it the samples go through bit for
+/// bit, exactly as they did before any of this existed. It is also far inside what anybody can see
+/// as lip sync, so a jittery device can wander around in it without costing anything.
+const LOOPBACK_DEADBAND_HNS: i64 = HNS_PER_SECOND / 100;
+
 #[derive(Clone, Copy, serde::Serialize)]
 pub struct MixFormat {
     pub sample_rate: u32,
@@ -84,6 +95,15 @@ pub struct PollStats {
     pub discontinuities: u64,
 }
 
+impl PollStats {
+    pub fn add(&mut self, other: &PollStats) {
+        self.captured_frames += other.captured_frames;
+        self.filled_frames += other.filled_frames;
+        self.silent_packets += other.silent_packets;
+        self.discontinuities += other.discontinuities;
+    }
+}
+
 pub struct Endpoint {
     _capture_client: IAudioClient,
     capture: IAudioCaptureClient,
@@ -91,37 +111,16 @@ pub struct Endpoint {
     format: MixFormat,
     /// Per-source-channel gain into left and right, derived from the endpoint's channel mask.
     downmix: Vec<(f32, f32)>,
-    /// QPC of the sample immediately after the last one we emitted, in 100 ns units.
-    next_hns: Option<i64>,
     /// QPC just past the last sample of the most recent packet — the end of the device's timeline,
     /// so it can be compared against a sample count without being one packet short.
     pub last_packet_hns: i64,
     pub first_hns: Option<i64>,
     /// Constant correction added to every device timestamp. See `anchor` below: normally zero.
     pub skew_hns: i64,
-
-    /// Whether this endpoint's sample clock is pulled onto the capture clock by resampling.
-    ///
-    /// On for a microphone and off for the render endpoint read in loopback, and the difference is
-    /// not arbitrary. The loopback stream is produced by the audio engine, whose clock the rest of
-    /// the machine already agrees with — measured at 0 filled frames and 0.0 ms of drift over a
-    /// minute. A USB microphone has its own crystal and no reason to match anything: the one on
-    /// this machine runs **0.545% slow**, which over twenty seconds is 110 ms of samples that never
-    /// arrive. What to do about those 110 ms is the whole question, and the first answer here —
-    /// insert silence to cover the gap — was wrong in the way that matters: it put a 24-sample
-    /// hole of digital silence into the voice roughly ten times a second, which is audible as a
-    /// continuous crackle and is exactly what "it sounds like interference when I speak" is.
-    rate_match: bool,
-    /// Output frames emitted since the stream began. With resampling this no longer equals the
-    /// number of frames the device handed over, so the timeline has to count them separately.
-    emitted: u64,
-    /// Input frames waiting to be resampled, and the fractional read position within them. One
-    /// frame is always left behind so interpolation carries across a packet boundary.
-    res_in: Vec<[f32; 2]>,
-    res_pos: f64,
-    /// The correction currently being applied, as a ratio. Reported, because a device silently
-    /// running half a percent slow is the sort of thing worth being able to see.
-    pub rate_ratio: f64,
+    /// What keeps the samples on the capture clock. See `Pacer`.
+    pacer: Pacer,
+    /// One packet, folded to stereo, on its way into the pacer. Kept to save an allocation a packet.
+    pairs: Vec<[f32; 2]>,
     /// Frames the device has handed over, for measuring its clock against ours.
     pub captured: u64,
 }
@@ -166,16 +165,12 @@ impl Endpoint {
                 _render: render,
                 format,
                 downmix,
-                next_hns: None,
                 last_packet_hns: 0,
                 first_hns: None,
                 skew_hns: 0,
-                rate_match: false,
-                emitted: 0,
+                pacer: Pacer::new(format.sample_rate, LOOPBACK_DEADBAND_HNS),
+                pairs: Vec::new(),
                 captured: 0,
-                res_in: Vec::new(),
-                res_pos: 0.0,
-                rate_ratio: 1.0,
             })
         }
     }
@@ -294,16 +289,12 @@ impl Endpoint {
                     _render: None,
                     format,
                     downmix,
-                    next_hns: None,
                     last_packet_hns: 0,
                     first_hns: None,
                     skew_hns: 0,
-                    rate_match: true,
-                    emitted: 0,
+                    pacer: Pacer::new(format.sample_rate, 0),
+                    pairs: Vec::new(),
                     captured: 0,
-                    res_in: Vec::new(),
-                    res_pos: 0.0,
-                    rate_ratio: 1.0,
                 },
                 name,
                 id,
@@ -336,7 +327,14 @@ impl Endpoint {
     /// first sample the next `poll` appends — gap filling starts here too. `None` before the first
     /// packet has arrived.
     pub fn position_hns(&self) -> Option<i64> {
-        self.next_hns
+        self.pacer.position_hns()
+    }
+
+    /// The rate correction currently being applied, as a ratio: exactly 1.0 for a device that is
+    /// keeping time. Reported, because a device silently running half a percent slow is the sort
+    /// of thing worth being able to see.
+    pub fn rate_ratio(&self) -> f64 {
+        self.pacer.ratio
     }
 
     /// Appends interleaved stereo 16-bit samples for everything the endpoint has ready.
@@ -372,10 +370,10 @@ impl Endpoint {
             self.last_packet_hns = packet_hns + frames as i64 * HNS_PER_SECOND / rate;
             if self.first_hns.is_none() {
                 self.first_hns = Some(packet_hns);
-                self.next_hns = Some(packet_hns);
             }
 
-            if flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0 {
+            let discontinuity = flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32 != 0;
+            if discontinuity {
                 stats.discontinuities += 1;
             }
             let silent = flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32 != 0;
@@ -384,53 +382,11 @@ impl Endpoint {
                 stats.silent_packets += 1;
             }
 
-            if self.rate_match {
-                // Where our output has reached, against where the device says this packet belongs.
-                let base = self.first_hns.unwrap_or(packet_hns);
-                let mut ours = base + self.emitted as i64 * HNS_PER_SECOND / rate;
-                let mut error = packet_hns - ours;
-
-                // Far enough out to be a real hole rather than a clock difference: cover it and
-                // start again from here.
-                if error > DROPOUT_HNS {
-                    let gap_frames = (error * rate / HNS_PER_SECOND) as u64;
-                    out.extend(std::iter::repeat(0).take(gap_frames as usize * OUT_CHANNELS));
-                    stats.filled_frames += gap_frames;
-                    self.emitted += gap_frames;
-                    ours = base + self.emitted as i64 * HNS_PER_SECOND / rate;
-                    error = packet_hns - ours;
-                }
-
-                // Otherwise the device is simply running at its own rate, and the way to agree
-                // with it is to resample rather than to punch holes in what it sent.
-                let drift = (error as f64 / RATE_MATCH_TAU_HNS).clamp(-RATE_MATCH_MAX, RATE_MATCH_MAX);
-                self.rate_ratio = 1.0 + drift;
-
-                let mut input = std::mem::take(&mut self.res_in);
-                self.decode_pairs(data, frames, silent, &mut input);
-                self.res_in = input;
-                self.emitted += self.resample_into(self.rate_ratio, out);
-                self.next_hns = Some(base + self.emitted as i64 * HNS_PER_SECOND / rate);
-            } else {
-                // The endpoint's own timestamp says where this packet belongs. Anything missing
-                // between the last sample we emitted and here is a hole that has to be filled, or
-                // the audio track ends up shorter than the video by exactly that much.
-                if let Some(expected) = self.next_hns {
-                    let gap_hns = packet_hns - expected;
-                    // Half a millisecond of slop: sub-sample rounding is not a gap.
-                    if gap_hns > HNS_PER_SECOND / 2000 {
-                        let gap_frames = (gap_hns * rate / HNS_PER_SECOND) as u64;
-                        out.extend(std::iter::repeat(0).take(gap_frames as usize * OUT_CHANNELS));
-                        stats.filled_frames += gap_frames;
-                    }
-                }
-                if silent {
-                    out.extend(std::iter::repeat(0).take(frames as usize * OUT_CHANNELS));
-                } else {
-                    self.append(data, frames, out);
-                }
-                self.next_hns = Some(packet_hns + frames as i64 * HNS_PER_SECOND / rate);
-            }
+            let mut pairs = std::mem::take(&mut self.pairs);
+            pairs.clear();
+            self.decode_pairs(data, frames, silent, &mut pairs);
+            stats.filled_frames += self.pacer.packet(packet_hns, &pairs, discontinuity, out);
+            self.pairs = pairs;
 
             stats.captured_frames += frames as u64;
             self.captured += frames as u64;
@@ -438,22 +394,6 @@ impl Endpoint {
             unsafe { self.capture.ReleaseBuffer(frames)? };
         }
         Ok(stats)
-    }
-
-    fn append(&self, data: *const u8, frames: u32, out: &mut Vec<i16>) {
-        let channels = self.format.channels as usize;
-        out.reserve(frames as usize * OUT_CHANNELS);
-
-        for f in 0..frames as usize {
-            let (mut left, mut right) = (0.0f32, 0.0f32);
-            for (c, (wl, wr)) in self.downmix.iter().enumerate().take(channels) {
-                let v = unsafe { self.sample(data, f * channels + c) };
-                left += v * wl;
-                right += v * wr;
-            }
-            out.push(to_i16(left));
-            out.push(to_i16(right));
-        }
     }
 
     /// One packet, folded to stereo and left in floating point so the resampler has something to
@@ -476,34 +416,6 @@ impl Endpoint {
         }
     }
 
-    /// Linear interpolation at `ratio` output frames per input frame.
-    ///
-    /// Linear is enough here and would not be if the ratio were far from one: at 1.005 the
-    /// interpolation happens between samples 20 µs apart, where a speech waveform is very nearly a
-    /// straight line. The alternative — a windowed-sinc resampler — buys nothing audible for a
-    /// correction this small and costs a great deal more arithmetic on every frame.
-    fn resample_into(&mut self, ratio: f64, out: &mut Vec<i16>) -> u64 {
-        let step = 1.0 / ratio;
-        let mut produced = 0u64;
-        while self.res_pos + 1.0 < self.res_in.len() as f64 {
-            let i = self.res_pos as usize;
-            let t = (self.res_pos - i as f64) as f32;
-            let a = self.res_in[i];
-            let b = self.res_in[i + 1];
-            out.push(to_i16(a[0] + (b[0] - a[0]) * t));
-            out.push(to_i16(a[1] + (b[1] - a[1]) * t));
-            self.res_pos += step;
-            produced += 1;
-        }
-        // Keep the frame the next interpolation starts from.
-        let consumed = self.res_pos as usize;
-        if consumed > 0 {
-            self.res_in.drain(..consumed);
-            self.res_pos -= consumed as f64;
-        }
-        produced
-    }
-
     unsafe fn sample(&self, data: *const u8, index: usize) -> f32 {
         match (self.format.float, self.format.bits) {
             (true, 32) => *(data as *const f32).add(index),
@@ -517,6 +429,147 @@ impl Endpoint {
             }
             _ => 0.0,
         }
+    }
+}
+
+/// Keeps one endpoint's samples on the capture clock, which is the clock the video is stamped with.
+///
+/// Every packet arrives with the QPC time its first sample was captured at, and this compares that
+/// against where our own output has got to. The difference is one of three things, and each wants
+/// a different answer:
+///
+/// * **Jitter.** Packet timestamps scatter either side of where a sample count says they belong,
+///   and come back. Nothing is missing, so the answer is to do nothing.
+/// * **A clock of its own.** A USB microphone has its own crystal and no reason to match anything:
+///   the one on this machine runs **0.545% slow**, which over twenty seconds is 110 ms of samples
+///   that never arrive. The answer is to resample by that fraction of a percent.
+/// * **A real hole** — the engine stopped, or the device overran and says so with
+///   `DATA_DISCONTINUITY`. Samples really are missing, and silence is the honest thing to put
+///   there.
+///
+/// The first version of this treated all three as the third, for both legs: any packet more than
+/// half a millisecond later than the last one ended got silence in front of it. Filling only ever
+/// adds and never takes away, so every late excursion punched a hole of digital silence into the
+/// middle of the waveform — on a USB microphone one every 92 ms, audible as a continuous crackle
+/// and reported as "it sounds like interference when I speak". The desktop leg kept that rule for
+/// longer, because the render endpoint here keeps perfect time; a render endpoint that does not —
+/// a USB or wireless headset, a virtual mixer — crackled the game audio the same way.
+///
+/// Both legs now share this. They differ only in the deadband: how far out the device may sit
+/// before it is corrected at all. Inside it the ratio is exactly one and the samples pass through
+/// bit for bit, which is what keeps a healthy desktop leg identical to what it always was.
+struct Pacer {
+    rate: i64,
+    deadband_hns: i64,
+    /// Where the first sample belongs. `None` before the first packet.
+    base: Option<i64>,
+    /// Output frames emitted since the stream began. With resampling this no longer equals the
+    /// number of frames the device handed over, so the timeline has to count them separately.
+    emitted: u64,
+    /// Input frames waiting to be resampled, and the fractional read position within them. The
+    /// interpolator reads one frame behind the position and two ahead, so a frame of zeros stands
+    /// in for the frame before the first and the last two are always held back for the next packet.
+    input: Vec<[f32; 2]>,
+    pos: f64,
+    /// The correction currently being applied, as a ratio of output frames to input frames.
+    ratio: f64,
+}
+
+impl Pacer {
+    fn new(rate: u32, deadband_hns: i64) -> Pacer {
+        Pacer {
+            rate: rate as i64,
+            deadband_hns,
+            base: None,
+            emitted: 0,
+            input: vec![[0.0; 2]],
+            pos: 1.0,
+            ratio: 1.0,
+        }
+    }
+
+    fn position_hns(&self) -> Option<i64> {
+        self.base
+            .map(|base| base + self.emitted as i64 * HNS_PER_SECOND / self.rate)
+    }
+
+    /// Places one packet on the timeline and appends whatever can be emitted, as interleaved 16-bit
+    /// stereo. Returns the frames of silence that had to be invented in front of it.
+    fn packet(
+        &mut self,
+        packet_hns: i64,
+        samples: &[[f32; 2]],
+        discontinuity: bool,
+        out: &mut Vec<i16>,
+    ) -> u64 {
+        self.base.get_or_insert(packet_hns);
+        let mut error = packet_hns - self.position_hns().unwrap_or(packet_hns);
+
+        // A hole: cover it and carry on from here. A flagged discontinuity is the device saying in
+        // so many words that samples were lost, so it does not have to be large to be believed.
+        let mut filled = 0;
+        if error > DROPOUT_HNS || (discontinuity && error > self.deadband_hns) {
+            filled = (error * self.rate / HNS_PER_SECOND) as u64;
+            out.extend(std::iter::repeat(0).take(filled as usize * OUT_CHANNELS));
+            self.emitted += filled;
+            error = packet_hns - self.position_hns().unwrap_or(packet_hns);
+        }
+
+        // Anything else is the device keeping its own time, and the way to agree with it is to
+        // resample rather than to punch holes in what it sent.
+        let excess = error.abs() - self.deadband_hns;
+        self.ratio = if excess <= 0 {
+            1.0
+        } else {
+            let drift = excess as f64 * error.signum() as f64 / RATE_MATCH_TAU_HNS;
+            1.0 + drift.clamp(-RATE_MATCH_MAX, RATE_MATCH_MAX)
+        };
+
+        self.input.extend_from_slice(samples);
+        self.emitted += self.resample(out);
+        filled
+    }
+
+    /// Cubic (Catmull-Rom) interpolation at `ratio` output frames per input frame.
+    ///
+    /// At a ratio of exactly one the read position stays on whole frames, where the interpolator
+    /// returns the frame itself, so a device inside its deadband comes out untouched. Away from
+    /// one, cubic rather than linear because the desktop leg is music and effects rather than
+    /// speech: linear interpolation halfway between two samples is already 3 dB down at 12 kHz,
+    /// and as the position slides through each frame that dulling comes and goes several times a
+    /// second — a shimmer on every cymbal. Cubic holds it to 1 dB there. A windowed-sinc kernel
+    /// would buy nothing audible past that for a correction of a fraction of a percent.
+    fn resample(&mut self, out: &mut Vec<i16>) -> u64 {
+        let step = 1.0 / self.ratio;
+        let mut produced = 0u64;
+        while (self.pos as usize) + 2 < self.input.len() {
+            let i = self.pos as usize;
+            let t = (self.pos - i as f64) as f32;
+            let [p0, p1, p2, p3] = [
+                self.input[i - 1],
+                self.input[i],
+                self.input[i + 1],
+                self.input[i + 2],
+            ];
+            for c in 0..OUT_CHANNELS {
+                let (a, b, c2, d) = (p0[c], p1[c], p2[c], p3[c]);
+                let v = 0.5
+                    * (2.0 * b
+                        + (c2 - a) * t
+                        + (2.0 * a - 5.0 * b + 4.0 * c2 - d) * t * t
+                        + (3.0 * (b - c2) + d - a) * t * t * t);
+                out.push(to_i16(v));
+            }
+            self.pos += step;
+            produced += 1;
+        }
+        // Keep the frame before the next read position, which the interpolator reaches back for.
+        let consumed = (self.pos as usize).saturating_sub(1);
+        if consumed > 0 {
+            self.input.drain(..consumed);
+            self.pos -= consumed as f64;
+        }
+        produced
     }
 }
 
@@ -1022,6 +1075,9 @@ pub struct Mixer {
     /// invented to cover a hole the device left is exactly what a chopped-up voice sounds like, and
     /// summing the two sources' statistics together would hide which one was doing it.
     pub mic_stats: PollStats,
+    /// And the desktop's. Zero filled frames on a render endpoint that keeps time; anything else
+    /// is the engine stopping or the device overrunning, and each one is a splice in the game audio.
+    pub desk_stats: PollStats,
     /// Rounds in which the mic was too far behind to wait for. Zero on a healthy machine.
     pub mic_dropouts: u64,
 }
@@ -1119,6 +1175,7 @@ impl Mixer {
             mic_open: "",
             mic_frames: 0,
             mic_stats: PollStats::default(),
+            desk_stats: PollStats::default(),
             keep_legs: false,
             leg_desktop: Vec::new(),
             leg_mic: Vec::new(),
@@ -1235,7 +1292,15 @@ impl Mixer {
     /// matching is there to absorb.
     pub fn mic_rate_ppm(&self) -> i64 {
         match &self.mic {
-            Some(mic) => ((mic.rate_ratio - 1.0) * 1_000_000.0).round() as i64,
+            Some(mic) => ((mic.rate_ratio() - 1.0) * 1_000_000.0).round() as i64,
+            None => 0,
+        }
+    }
+
+    /// The same for the desktop leg, which is zero whenever the render endpoint keeps time.
+    pub fn desk_rate_ppm(&self) -> i64 {
+        match &self.desktop {
+            Some(desk) => ((desk.rate_ratio() - 1.0) * 1_000_000.0).round() as i64,
             None => 0,
         }
     }
@@ -1317,6 +1382,7 @@ impl Mixer {
                 return Ok(PollStats::default());
             };
             let stats = desktop.poll(out)?;
+            self.desk_stats.add(&stats);
             self.first_hns = desktop.first_hns;
             self.last_packet_hns = desktop.last_packet_hns;
             return Ok(stats);
@@ -1357,19 +1423,14 @@ impl Mixer {
 
         let mut scratch = std::mem::take(&mut self.scratch_pcm);
         let desk_stats = drain_into(&mut self.desktop, &mut self.desk, &mut scratch, None)?;
-        stats.captured_frames += desk_stats.captured_frames;
-        stats.filled_frames += desk_stats.filled_frames;
-        stats.silent_packets += desk_stats.silent_packets;
-        stats.discontinuities += desk_stats.discontinuities;
+        stats.add(&desk_stats);
+        self.desk_stats.add(&desk_stats);
 
         let noise = self.noise.as_mut().map(|n| (n, &mut self.noise_origin));
         match drain_into(&mut self.mic, &mut self.mike, &mut scratch, noise) {
             Ok(mic_stats) => {
                 self.mic_frames += mic_stats.captured_frames;
-                self.mic_stats.captured_frames += mic_stats.captured_frames;
-                self.mic_stats.filled_frames += mic_stats.filled_frames;
-                self.mic_stats.silent_packets += mic_stats.silent_packets;
-                self.mic_stats.discontinuities += mic_stats.discontinuities;
+                self.mic_stats.add(&mic_stats);
             }
             Err(e) => {
                 // A microphone that errors mid-stream has usually been unplugged. Drop it, keep
@@ -1641,6 +1702,186 @@ impl Limiter {
 
 fn peak_of(samples: &[i32]) -> f32 {
     samples.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0) as f32
+}
+
+#[cfg(test)]
+mod pacer_tests {
+    use super::*;
+
+    const RATE: i64 = 48_000;
+    /// 10 ms, which is what a shared-mode endpoint hands over at a time.
+    const PACKET: usize = 480;
+
+    /// A deterministic scatter in ±`spread_hns`, so a failure reproduces.
+    struct Jitter(u64, i64);
+    impl Jitter {
+        fn next(&mut self) -> i64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            if self.1 == 0 {
+                return 0;
+            }
+            ((self.0 >> 33) as i64 % (2 * self.1 + 1)) - self.1
+        }
+    }
+
+    /// A sine as the device hands it over, and the QPC stamp of each packet. `clock_ppm` is how
+    /// fast the device's samples run against the capture clock: negative is a device that delivers
+    /// fewer samples than its timestamps say, which is the case that used to be filled.
+    fn device(
+        seconds: usize,
+        clock_ppm: f64,
+        jitter_hns: i64,
+    ) -> Vec<(i64, Vec<[f32; 2]>)> {
+        let mut jitter = Jitter(7, jitter_hns);
+        let per_frame = HNS_PER_SECOND as f64 / RATE as f64 / (1.0 + clock_ppm / 1e6);
+        (0..seconds * 100)
+            .map(|k| {
+                let first = k * PACKET;
+                let stamp = 1_000_000_000 + (first as f64 * per_frame) as i64 + jitter.next();
+                let samples = (first..first + PACKET)
+                    .map(|n| {
+                        // Phase from integers: `n * 440 * TAU` in floating point has no precision
+                        // left by half a minute in, and the fixture stops being a sine.
+                        let phase = (n as i64 * 440 % RATE) as f64 / RATE as f64;
+                        let v = ((phase * std::f64::consts::TAU).sin() * 0.5) as f32;
+                        [v, v]
+                    })
+                    .collect();
+                (stamp, samples)
+            })
+            .collect()
+    }
+
+    fn run(pacer: &mut Pacer, packets: &[(i64, Vec<[f32; 2]>)]) -> (Vec<i16>, u64) {
+        let mut out = Vec::new();
+        let mut filled = 0;
+        for (stamp, samples) in packets {
+            filled += pacer.packet(*stamp, samples, false, &mut out);
+        }
+        (out, filled)
+    }
+
+    /// Packets the old rule — silence in front of anything more than half a millisecond later than
+    /// the previous packet ended — would have punched a hole before. The fixtures below have to
+    /// trip it, or passing proves nothing.
+    fn old_rule_holes(packets: &[(i64, Vec<[f32; 2]>)]) -> usize {
+        let dur = PACKET as i64 * HNS_PER_SECOND / RATE;
+        packets
+            .windows(2)
+            .filter(|w| w[1].0 - (w[0].0 + dur) > HNS_PER_SECOND / 2000)
+            .count()
+    }
+
+    /// The largest step between neighbouring samples. A 440 Hz sine at half scale never moves more
+    /// than about 950 per sample; a splice of silence into it moves up to 16 000 in one.
+    fn worst_step(out: &[i16]) -> i32 {
+        out.chunks_exact(OUT_CHANNELS)
+            .map(|f| f[0] as i32)
+            .collect::<Vec<_>>()
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .max()
+            .unwrap()
+    }
+
+    fn input_i16(packets: &[(i64, Vec<[f32; 2]>)]) -> Vec<i16> {
+        packets
+            .iter()
+            .flat_map(|(_, s)| s.iter().flat_map(|f| [to_i16(f[0]), to_i16(f[1])]))
+            .collect()
+    }
+
+    /// A render endpoint that keeps time — this machine's, measured — must come out bit for bit
+    /// what it went in as. This is the promise that the desktop leg did not change for anybody
+    /// whose audio was already fine.
+    #[test]
+    fn a_device_that_keeps_time_passes_through_untouched() {
+        let packets = device(20, 1.0, 200);
+        let mut pacer = Pacer::new(RATE as u32, LOOPBACK_DEADBAND_HNS);
+        let (out, filled) = run(&mut pacer, &packets);
+        assert_eq!(filled, 0);
+        assert_eq!(pacer.ratio, 1.0);
+        let input = input_i16(&packets);
+        // Two frames are held back as the interpolator's lookahead.
+        assert_eq!(out.len(), input.len() - 2 * OUT_CHANNELS);
+        assert!(out == input[..out.len()], "samples altered on a device inside its deadband");
+    }
+
+    /// The crackle. Timestamps scattered by a few milliseconds, as a USB or wireless headset's are:
+    /// the old rule put silence in front of a large share of the packets.
+    #[test]
+    fn jitter_is_not_filled_with_silence() {
+        let packets = device(20, 0.0, 30_000);
+        assert!(old_rule_holes(&packets) > 500, "fixture does not jitter enough to matter");
+
+        let mut pacer = Pacer::new(RATE as u32, LOOPBACK_DEADBAND_HNS);
+        let (out, filled) = run(&mut pacer, &packets);
+        assert_eq!(filled, 0, "invented silence for jitter");
+        assert!(out == input_i16(&packets)[..out.len()], "resampled what was only jitter");
+    }
+
+    /// A render endpoint on a crystal of its own, a quarter of a percent either way. The old rule
+    /// looked only from one packet to the next, so drift never tripped it — the desktop leg simply
+    /// slid against the video, 150 ms a minute at this rate. Now it is resampled, the stream stays
+    /// continuous, and the timeline ends up where the device's timestamps say it should.
+    #[test]
+    fn a_slow_clock_is_resampled_rather_than_holed() {
+        for clock_ppm in [-2500.0, 2500.0] {
+            let packets = device(60, clock_ppm, 2_000);
+            let mut pacer = Pacer::new(RATE as u32, LOOPBACK_DEADBAND_HNS);
+            let (out, filled) = run(&mut pacer, &packets);
+            assert_eq!(filled, 0, "{clock_ppm} ppm: invented silence for drift");
+            assert!(worst_step(&out) < 1_100, "{clock_ppm} ppm: discontinuity of {}", worst_step(&out));
+
+            let (last, samples) = packets.last().unwrap();
+            let device_end = last + samples.len() as i64 * HNS_PER_SECOND / RATE;
+            let error = device_end - pacer.position_hns().unwrap();
+            assert!(
+                error.abs() < LOOPBACK_DEADBAND_HNS + HNS_PER_SECOND / 200,
+                "{clock_ppm} ppm: {} ms off the device's timeline after a minute",
+                error as f64 / 10_000.0
+            );
+        }
+    }
+
+    /// Where the engine really did stop, the silence still goes in, and at the right length: this
+    /// is what keeps the audio track as long as the video.
+    #[test]
+    fn a_real_hole_is_still_filled() {
+        let mut packets = device(4, 0.0, 0);
+        for p in packets.iter_mut().skip(200) {
+            p.0 += 2_000_000; // 200 ms with nothing delivered
+        }
+        let mut pacer = Pacer::new(RATE as u32, LOOPBACK_DEADBAND_HNS);
+        let (_, filled) = run(&mut pacer, &packets);
+        assert!((9_590..=9_610).contains(&filled), "filled {filled} frames for a 9600-frame hole");
+    }
+
+    /// A device that says it lost samples is believed, even when the hole is inside the deadband.
+    #[test]
+    fn a_flagged_discontinuity_is_filled() {
+        let packets = device(1, 0.0, 0);
+        let mut pacer = Pacer::new(RATE as u32, LOOPBACK_DEADBAND_HNS);
+        let mut out = Vec::new();
+        for (stamp, samples) in &packets[..10] {
+            pacer.packet(*stamp, samples, false, &mut out);
+        }
+        let (stamp, samples) = &packets[10];
+        let filled = pacer.packet(stamp + 150_000, samples, true, &mut out);
+        assert!((718..=722).contains(&filled), "filled {filled} frames for a 15 ms overrun");
+    }
+
+    /// The microphone keeps no deadband, as before: a 0.545% slow USB mic, which is the one this
+    /// machine has, is pulled onto the timeline without a single frame of silence.
+    #[test]
+    fn a_microphone_is_still_rate_matched() {
+        let packets = device(20, -5450.0, 3_000);
+        let mut pacer = Pacer::new(RATE as u32, 0);
+        let (out, filled) = run(&mut pacer, &packets);
+        assert_eq!(filled, 0);
+        assert!(worst_step(&out) < 1_100);
+        assert!((pacer.ratio - 1.00545).abs() < 0.0005, "ratio settled at {}", pacer.ratio);
+    }
 }
 
 #[cfg(test)]

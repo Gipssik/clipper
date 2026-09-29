@@ -49,6 +49,45 @@ fn friendly_name(activate: &IMFActivate) -> String {
     }
 }
 
+/// The widest picture every hardware H.264 encoder takes. NVENC, AMD's VCN and Intel's QuickSync
+/// all stop at 4096 pixels a side for H.264, whatever the panel is.
+const MAX_SIDE: u32 = 4096;
+/// Level 5.1/5.2's MaxFS, in 16x16 macroblocks: 4096x2304, or 4096x2160 with room to spare.
+const MAX_FRAME_MBS: u32 = 36_864;
+/// Level 5.2's MaxMBPS. At 60 fps this is 34 560 macroblocks a frame — exactly 4096x2160.
+const MAX_MBS_PER_SECOND: u32 = 2_073_600;
+
+/// The largest picture no bigger than `width` x `height`, in the same shape, that an H.264 hardware
+/// encoder will accept at `fps`.
+///
+/// This exists for the super-ultrawide. A 5120x1440 panel is a common thing to game on, and its
+/// `native` *and* `ultra` tiers both ask for 5120 pixels across — past what any vendor's H.264
+/// encoder takes. Every hardware candidate then fails to configure and `Encoder::new` walks on down
+/// to Microsoft's software encoder, which runs 1440p60 on the CPU the game is using and reads every
+/// frame back from the GPU to do it: the one outcome this recorder exists to prevent, and silent
+/// apart from a line in the log. Scaling to 4096x1152 costs a fifth of the width in resolution; the
+/// fallback costs the frame rate of the game.
+pub fn fit(width: u32, height: u32, fps: u32) -> (u32, u32) {
+    let mbs = |w: u32, h: u32| w.div_ceil(16) * h.div_ceil(16);
+    let budget = MAX_FRAME_MBS.min(MAX_MBS_PER_SECOND / fps.max(1));
+    if width <= MAX_SIDE && height <= MAX_SIDE && mbs(width, height) <= budget {
+        return (width, height);
+    }
+    let (w0, h0) = (width.max(1) as f64, height.max(1) as f64);
+    let scale = (MAX_SIDE as f64 / w0)
+        .min(MAX_SIDE as f64 / h0)
+        .min((budget as f64 * 256.0 / (w0 * h0)).sqrt())
+        .min(1.0);
+    let mut w = ((w0 * scale) as u32).max(2) & !1;
+    let mut h = ((h0 * scale) as u32).max(2) & !1;
+    // Macroblock rounding can leave the float answer a row over the budget; shave until it fits.
+    while w > 2 && h > 2 && mbs(w, h) > budget {
+        w -= 2;
+        h = ((w as f64 * h0 / w0) as u32).max(2) & !1;
+    }
+    (w, h)
+}
+
 pub struct Packet {
     pub data: Vec<u8>,
     pub pts_hns: i64,
@@ -107,7 +146,7 @@ impl Encoder {
         let mut last_error = None;
         let mut rejected = 0u32;
         for hardware in [true, false] {
-            for activate in enumerate(hardware)? {
+            for activate in enumerate(hardware, gpu)? {
                 match Self::try_activate(gpu, config, &activate, hardware) {
                     Ok(mut encoder) => {
                         encoder.rejected = rejected;
@@ -473,7 +512,16 @@ impl Drop for Encoder {
     }
 }
 
-fn enumerate(hardware: bool) -> Result<Vec<IMFActivate>> {
+/// The H.264 encoders to try, best first.
+///
+/// Hardware transforms are asked for **on our device's adapter only**. `MFTEnumEx` lists the
+/// encoders of every GPU in the machine, and on a laptop with an integrated and a discrete GPU the
+/// one sorted first is routinely the other adapter's: at best it refuses our device and costs a
+/// probe and an encode session, at worst a vendor's transform accepts a device from a GPU it does
+/// not drive. `MFTEnum2` with `MFT_ENUM_ADAPTER_LUID` is the documented way to ask for the ones
+/// that can read our textures. Where it is unavailable or finds nothing, the unfiltered list is
+/// the fallback, which is what this did before.
+fn enumerate(hardware: bool, gpu: &Gpu) -> Result<Vec<IMFActivate>> {
     let output_info = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
         guidSubtype: MFVideoFormat_H264,
@@ -483,6 +531,14 @@ fn enumerate(hardware: bool) -> Result<Vec<IMFActivate>> {
     } else {
         MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER
     };
+
+    if hardware {
+        if let Ok(found) = enumerate_on_adapter(flags, &output_info, gpu) {
+            if !found.is_empty() {
+                return Ok(found);
+            }
+        }
+    }
 
     let mut activates: *mut Option<IMFActivate> = std::ptr::null_mut();
     let mut count = 0u32;
@@ -496,7 +552,46 @@ fn enumerate(hardware: bool) -> Result<Vec<IMFActivate>> {
             &mut count,
         )?;
     }
+    Ok(take_activates(activates, count))
+}
 
+fn enumerate_on_adapter(
+    flags: MFT_ENUM_FLAG,
+    output_info: &MFT_REGISTER_TYPE_INFO,
+    gpu: &Gpu,
+) -> Result<Vec<IMFActivate>> {
+    let mut attributes: Option<IMFAttributes> = None;
+    unsafe { MFCreateAttributes(&mut attributes, 1)? };
+    let attributes = attributes.unwrap();
+    let luid = unsafe {
+        std::slice::from_raw_parts(
+            &gpu.luid as *const _ as *const u8,
+            std::mem::size_of_val(&gpu.luid),
+        )
+    };
+    unsafe { attributes.SetBlob(&MFT_ENUM_ADAPTER_LUID, luid)? };
+
+    let mut activates: *mut Option<IMFActivate> = std::ptr::null_mut();
+    let mut count = 0u32;
+    unsafe {
+        MFTEnum2(
+            MFT_CATEGORY_VIDEO_ENCODER,
+            flags,
+            None,
+            Some(output_info),
+            &attributes,
+            &mut activates,
+            &mut count,
+        )?;
+    }
+    Ok(take_activates(activates, count))
+}
+
+/// Moves the array `MFTEnumEx` / `MFTEnum2` allocated into a Vec and frees it.
+fn take_activates(activates: *mut Option<IMFActivate>, count: u32) -> Vec<IMFActivate> {
+    if activates.is_null() {
+        return Vec::new();
+    }
     let mut result = Vec::with_capacity(count as usize);
     unsafe {
         for i in 0..count as usize {
@@ -506,7 +601,7 @@ fn enumerate(hardware: bool) -> Result<Vec<IMFActivate>> {
         }
         windows::Win32::System::Com::CoTaskMemFree(Some(activates as *const _));
     }
-    Ok(result)
+    result
 }
 
 /// Rate control and GOP structure — where most of the picture quality actually lives.
@@ -610,4 +705,30 @@ fn configure_codec(transform: &IMFTransform, config: &EncoderConfig) -> Vec<Stri
     );
 
     applied
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fit;
+
+    #[test]
+    fn ordinary_sizes_pass_through() {
+        for (w, h) in [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160), (3440, 1440), (1080, 1920)] {
+            assert_eq!(fit(w, h, 60), (w, h));
+        }
+    }
+
+    #[test]
+    fn ultrawides_fit_the_encoder() {
+        assert_eq!(fit(5120, 1440, 60), (4096, 1152));
+        assert_eq!(fit(7680, 2160, 60), (4096, 1152));
+        for (w, h) in [(5120, 2160), (7680, 4320), (6016, 3384), (5120, 1440)] {
+            let (fw, fh) = fit(w, h, 60);
+            assert!(fw <= 4096 && fh <= 4096 && fw % 2 == 0 && fh % 2 == 0);
+            assert!(fw.div_ceil(16) * fh.div_ceil(16) <= 34_560, "{w}x{h} -> {fw}x{fh}");
+            // Same shape, within a pixel's rounding.
+            let (a, b) = (w as f64 / h as f64, fw as f64 / fh as f64);
+            assert!((a - b).abs() / a < 0.01, "{w}x{h} -> {fw}x{fh}");
+        }
+    }
 }

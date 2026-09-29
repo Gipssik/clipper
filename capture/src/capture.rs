@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use windows::core::{IInspectable, Interface, Result};
-use windows::Foundation::TypedEventHandler;
+use windows::Foundation::{TimeSpan, TypedEventHandler};
 use windows::Graphics::Capture::{
     Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
 };
@@ -61,7 +61,8 @@ pub struct Capture {
 }
 
 impl Capture {
-    pub fn start(gpu: &Gpu, monitor: HMONITOR, format: DirectXPixelFormat) -> Result<Self> {
+    /// `fps` is the rate the caller will tick at; WGC is told not to deliver much faster than that.
+    pub fn start(gpu: &Gpu, monitor: HMONITOR, format: DirectXPixelFormat, fps: u32) -> Result<Self> {
         let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
         let item: GraphicsCaptureItem = unsafe { interop.CreateForMonitor(monitor)? };
         let size = item.Size()?;
@@ -88,6 +89,21 @@ impl Capture {
         // failing a capture over.
         let _ = session.SetIsCursorCaptureEnabled(false);
         let _ = session.SetIsBorderRequired(false);
+
+        // WGC delivers at the display's refresh rate, and every delivery is a copy DWM makes of the
+        // whole screen into our pool — on a 240 Hz panel, four for every frame a 60 fps recording
+        // keeps. That copy runs on the 3D engine the game is using. `MinUpdateInterval` (Windows 11
+        // 24H2) caps the rate; older builds reject it, and they keep today's behaviour.
+        //
+        // Half the tick period, not the whole of it. Deliveries land on vsync, so an interval of
+        // exactly one tick rounds up to the next vsync after it — 20.8 ms on a 240 Hz panel, 48 fps —
+        // and every fifth tick would repeat a frame the game had long since replaced. Half a tick
+        // rounded up to a vsync is still under a tick at every refresh rate (below 120 Hz it is a
+        // single vsync, so nothing changes at all), so a tick never goes without a fresh frame when
+        // one exists, and a 240 Hz panel does half the copies.
+        let _ = session.SetMinUpdateInterval(TimeSpan {
+            Duration: 10_000_000 / (2 * fps.max(1) as i64),
+        });
 
         session.StartCapture()?;
 
@@ -124,17 +140,26 @@ impl Capture {
     /// Takes whatever WGC has ready, without blocking. Returns true when a genuinely new frame
     /// arrived; false means the screen has not changed and `latest()` still holds the right
     /// picture.
+    ///
+    /// The pool can hold two frames by the time a tick comes round, whenever the display refreshes
+    /// faster than we tick. `TryGetNextFrame` hands them over oldest first, so taking one per tick
+    /// encodes a picture a refresh or more older than the one waiting behind it — video that runs
+    /// late against audio stamped at the moment it was heard, by up to a whole frame on a 60 Hz
+    /// panel. So the pool is drained and only the newest is copied; the rest go straight back.
     pub fn pump(&mut self, gpu: &Gpu) -> Result<bool> {
         // A null return is modelled as an error, and it is the normal "nothing changed" case —
         // on a still screen it is what we get every tick.
-        let frame = match self.pool.TryGetNextFrame() {
-            Ok(frame) => frame,
-            Err(_) => {
-                self.empty_polls += 1;
-                return Ok(false);
+        let mut newest = None;
+        while let Ok(frame) = self.pool.TryGetNextFrame() {
+            self.frames_in += 1;
+            if let Some(older) = newest.replace(frame) {
+                let _ = older.Close();
             }
+        }
+        let Some(frame) = newest else {
+            self.empty_polls += 1;
+            return Ok(false);
         };
-        self.frames_in += 1;
 
         let content_size = frame.ContentSize()?;
         let surface = frame.Surface()?;

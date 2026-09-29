@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use windows::core::{IInspectable, Interface, Result};
-use windows::Foundation::{TimeSpan, TypedEventHandler};
+use windows::Foundation::TypedEventHandler;
 use windows::Graphics::Capture::{
     Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession,
 };
@@ -61,8 +61,7 @@ pub struct Capture {
 }
 
 impl Capture {
-    /// `fps` is the rate the caller will tick at; WGC is told not to deliver much faster than that.
-    pub fn start(gpu: &Gpu, monitor: HMONITOR, format: DirectXPixelFormat, fps: u32) -> Result<Self> {
+    pub fn start(gpu: &Gpu, monitor: HMONITOR, format: DirectXPixelFormat) -> Result<Self> {
         let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
         let item: GraphicsCaptureItem = unsafe { interop.CreateForMonitor(monitor)? };
         let size = item.Size()?;
@@ -89,21 +88,6 @@ impl Capture {
         // failing a capture over.
         let _ = session.SetIsCursorCaptureEnabled(false);
         let _ = session.SetIsBorderRequired(false);
-
-        // WGC delivers at the display's refresh rate, and every delivery is a copy DWM makes of the
-        // whole screen into our pool — on a 240 Hz panel, four for every frame a 60 fps recording
-        // keeps. That copy runs on the 3D engine the game is using. `MinUpdateInterval` (Windows 11
-        // 24H2) caps the rate; older builds reject it, and they keep today's behaviour.
-        //
-        // Half the tick period, not the whole of it. Deliveries land on vsync, so an interval of
-        // exactly one tick rounds up to the next vsync after it — 20.8 ms on a 240 Hz panel, 48 fps —
-        // and every fifth tick would repeat a frame the game had long since replaced. Half a tick
-        // rounded up to a vsync is still under a tick at every refresh rate (below 120 Hz it is a
-        // single vsync, so nothing changes at all), so a tick never goes without a fresh frame when
-        // one exists, and a 240 Hz panel does half the copies.
-        let _ = session.SetMinUpdateInterval(TimeSpan {
-            Duration: 10_000_000 / (2 * fps.max(1) as i64),
-        });
 
         session.StartCapture()?;
 

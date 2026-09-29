@@ -1221,6 +1221,52 @@ daemon. Run without a parent (`record`, `audio`), it leaves out only itself. A t
 sound *in* the recording must therefore play it from outside that tree. Started from the harness,
 it is Clipper's and is left out.
 
+## Beyond the one GPU it was built on
+
+Everything above was measured on one machine: an RTX 5080 driving the monitor it records, with no
+second GPU. Four things are different on the hardware most people have, and all four were found by
+reading the API contracts rather than by measuring — so each is written to leave that one machine
+exactly as it was, and each still needs the counter read on a card that is not a 5080.
+
+**The device is created on the adapter that drives the monitor** (`d3d::create`). It used to be
+whatever `D3D11CreateDevice(None, …)` picked, which is adapter 0 — and on a laptop, adapter 0 is
+decided by Windows' graphics preference for `clipper-capture.exe`, not by where the screen is. The
+built-in panel hangs off the integrated GPU; an HDMI port is often wired to the discrete one. A
+device on the other adapter still works, because WGC copies every frame across, but that copy goes
+through system memory at the display's full refresh rate. On a machine with one GPU the adapter
+that owns the output *is* adapter 0, so nothing changes there. The adapter is in the log's
+`capturing …` line and in `status` as `adapter`.
+
+**Encoders are enumerated on that adapter only** (`MFTEnum2` with `MFT_ENUM_ADAPTER_LUID`).
+`MFTEnumEx` lists every GPU's encoders, sorted by merit, so on an Intel + NVIDIA laptop the first
+candidate tried is routinely the one that cannot read our textures. At best that costs a probe and
+an encode session a consumer driver only has a few of; an AMD APU beside an AMD discrete GPU lists
+two transforms with the same name, and nothing promised which one would accept a device it does
+not drive. The unfiltered list is still the fallback when the filtered one comes back empty.
+
+**WGC is told not to deliver much faster than the recorder ticks** (`MinUpdateInterval`, Windows
+11 24H2). Every delivery is DWM copying the whole screen into the pool on the 3D engine — the one
+the game is using — and on a 240 Hz panel that was four copies for every frame a 60 fps recording
+keeps. The interval is half a tick, not a whole one, because deliveries land on vsync: a whole
+tick rounds up to 20.8 ms at 240 Hz and the capture would fall to 48 fps. Half a tick rounded up
+to a vsync is under a tick at every refresh rate, and below 120 Hz it is one vsync, which changes
+nothing. Older Windows rejects the property and keeps the old behaviour. *To measure:* DWM's 3D
+share and the recorder's, on a 144 Hz or 240 Hz panel, against the same build with the line
+removed.
+
+The pool is also **drained to the newest frame** on every tick. It holds two, `TryGetNextFrame`
+hands them over oldest first, and taking one per tick meant encoding a picture a refresh behind
+the one queued after it — video late against audio by up to a frame on a 60 Hz panel.
+
+**The encoded picture is clamped to what H.264 hardware takes** (`encoder::fit`). NVENC, VCN and
+QuickSync all stop at 4096 pixels a side for H.264, and a 5120x1440 super-ultrawide asks for 5120
+across at both `ultra` and `native`. Every hardware candidate then failed to configure and the
+encoder walked down to Microsoft's software MFT — 1440p60 encoded on the CPU the game is using,
+with every frame read back from the GPU to get it there, and nothing but a log line to say so. It
+now records 4096x1152. The bound is level 5.2's (36 864 macroblocks a frame, 2 073 600 a second),
+which is exactly 4096x2160 at 60 fps, so a 4K panel at `native` is untouched. `cargo test` holds
+ordinary sizes to passing through unchanged.
+
 ## Known limits
 
 - **The fallback records the default output only, Clipper included.** Where process loopback cannot
@@ -1253,6 +1299,9 @@ it is Clipper's and is left out.
   centre and surrounds at -3 dB rather than the easy implementation's "keep front L/R", which would
   silently drop dialogue. 88.2 and 96 kHz endpoints route through Media Foundation's resampler.
   Neither path has been exercised on real hardware — this machine is 48 kHz stereo.
+- **Software encoding is still the last resort, and it is expensive.** Should no hardware
+  transform configure, `Encoder::new` falls back to Microsoft's CPU encoder, which reads each frame
+  back from the GPU. `status.encoder` names it; the panel does not yet warn.
 - **The downscale filter is narrowed past 2x.** Its support is capped at 8 taps per axis, which is
   exact at 2x — a 1440p panel at 720p — and short of the full Catmull-Rom footprint at, say, 4K to
   720p. A narrow kernel is the right failure: sampling a wide kernel sparsely aliases, which is what

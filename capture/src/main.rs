@@ -218,8 +218,8 @@ fn cmd_dump(args: &[String]) -> Fallible<()> {
         DirectXPixelFormat::B8G8R8A8UIntNormalized
     };
 
-    let gpu = d3d::create()?;
-    let mut cap = capture::Capture::start(&gpu, monitor.handle, format)?;
+    let gpu = d3d::create(Some(monitor.handle))?;
+    let mut cap = capture::Capture::start(&gpu, monitor.handle, format, fps)?;
 
     // The tone map is driven by what the display is actually doing, not by a flag: with HDR off,
     // scRGB is simply a linear version of ordinary sRGB content and the curve must stay out of it.
@@ -327,6 +327,7 @@ fn cmd_dump(args: &[String]) -> Fallible<()> {
         "missedTicks": ticker.missed,
         "outputSize": converter.as_ref().map(|c| { let (w, h) = c.size(); serde_json::json!({ "width": w, "height": h }) }),
         "toneMap": if tone_map { "mobius" } else { "none" },
+        "adapter": gpu.adapter,
         "nv12RenderTarget": convert::supports_nv12_render_target(&gpu),
         "convertMs": stats(&mut convert_ms),
         "tickJitterMs": stats(&mut jitter_ms),
@@ -368,11 +369,12 @@ fn cmd_encode(args: &[String]) -> Fallible<()> {
         DirectXPixelFormat::B8G8R8A8UIntNormalized
     };
 
-    let gpu = d3d::create()?;
-    let mut cap = capture::Capture::start(&gpu, monitor.handle, format)?;
+    let gpu = d3d::create(Some(monitor.handle))?;
+    let mut cap = capture::Capture::start(&gpu, monitor.handle, format, fps)?;
 
     let src = cap.size();
     let width = (src.Width as u32 * out_height / src.Height.max(1) as u32 + 1) & !1;
+    let (width, out_height) = encoder::fit(width, out_height, fps);
     let mut converter = convert::Converter::new(
         &gpu,
         src.Width as u32,
@@ -456,6 +458,7 @@ fn cmd_encode(args: &[String]) -> Fallible<()> {
 
     let gaps: Vec<i64> = keyframe_ticks.windows(2).map(|w| w[1] - w[0]).collect();
     let report = serde_json::json!({
+        "adapter": gpu.adapter,
         "encoder": enc.name,
         "hardware": enc.hardware,
         "codecSettingsApplied": enc.applied,

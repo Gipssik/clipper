@@ -135,8 +135,8 @@ impl Pipeline {
         };
 
         let tier = config.tier();
-        let gpu = d3d::create()?;
-        let capture = capture::Capture::start(&gpu, monitor.handle, format)?;
+        let gpu = d3d::create(Some(monitor.handle))?;
+        let capture = capture::Capture::start(&gpu, monitor.handle, format, tier.fps)?;
         let src = capture.size();
 
         // A tier of 0 means "whatever the display is".
@@ -146,6 +146,8 @@ impl Pipeline {
             (src.Height as u32).min(tier.max_height)
         };
         let width = (src.Width as u32 * target_height / src.Height.max(1) as u32 + 1) & !1;
+        // A super-ultrawide asks for more width than H.264 hardware takes; see `encoder::fit`.
+        let (width, target_height) = encoder::fit(width, target_height, tier.fps);
 
         let converter = convert::Converter::new(
             &gpu,
@@ -894,10 +896,11 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
             match Pipeline::start(&config, &monitor, config.enabled) {
                 Ok(p) => {
                     crate::lifecycle::log(&format!(
-                        "capturing {}x{} from {} ({}, {}-{} Mbps, {}{}, {} candidate(s) rejected first){}",
+                        "capturing {}x{} from {} on {} ({}, {}-{} Mbps, {}{}, {} candidate(s) rejected first){}",
                         p.width,
                         p.height,
                         monitor.friendly,
+                        p.gpu.adapter,
                         p.encoder_name,
                         p.bitrate / 1_000_000,
                         p.max_bitrate / 1_000_000,
@@ -1344,6 +1347,7 @@ fn status(
         "displayPresent": display_present,
         "hdr": panel,
         "encoder": pipeline.map(|p| p.encoder_name.clone()),
+        "adapter": pipeline.map(|p| p.gpu.adapter.clone()),
         "encoderSettings": pipeline.map(|p| p.encoder.applied.join(" ")),
         "size": pipeline.map(|p| serde_json::json!({ "width": p.width, "height": p.height })),
         "resampling": pipeline.map(|p| p.converter.resampling),

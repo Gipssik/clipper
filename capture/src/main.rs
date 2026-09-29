@@ -219,7 +219,7 @@ fn cmd_dump(args: &[String]) -> Fallible<()> {
     };
 
     let gpu = d3d::create(Some(monitor.handle))?;
-    let mut cap = capture::Capture::start(&gpu, monitor.handle, format, fps)?;
+    let mut cap = capture::Capture::start(&gpu, monitor.handle, format)?;
 
     // The tone map is driven by what the display is actually doing, not by a flag: with HDR off,
     // scRGB is simply a linear version of ordinary sRGB content and the curve must stay out of it.
@@ -370,7 +370,7 @@ fn cmd_encode(args: &[String]) -> Fallible<()> {
     };
 
     let gpu = d3d::create(Some(monitor.handle))?;
-    let mut cap = capture::Capture::start(&gpu, monitor.handle, format, fps)?;
+    let mut cap = capture::Capture::start(&gpu, monitor.handle, format)?;
 
     let src = cap.size();
     let width = (src.Width as u32 * out_height / src.Height.max(1) as u32 + 1) & !1;

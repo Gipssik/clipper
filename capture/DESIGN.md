@@ -1224,7 +1224,7 @@ it is Clipper's and is left out.
 ## Beyond the one GPU it was built on
 
 Everything above was measured on one machine: an RTX 5080 driving the monitor it records, with no
-second GPU. Four things are different on the hardware most people have, and all four were found by
+second GPU. Three things are different on the hardware most people have, and all three were found by
 reading the API contracts rather than by measuring — so each is written to leave that one machine
 exactly as it was, and each still needs the counter read on a card that is not a 5080.
 
@@ -1244,15 +1244,14 @@ an encode session a consumer driver only has a few of; an AMD APU beside an AMD 
 two transforms with the same name, and nothing promised which one would accept a device it does
 not drive. The unfiltered list is still the fallback when the filtered one comes back empty.
 
-**WGC is told not to deliver much faster than the recorder ticks** (`MinUpdateInterval`, Windows
-11 24H2). Every delivery is DWM copying the whole screen into the pool on the 3D engine — the one
-the game is using — and on a 240 Hz panel that was four copies for every frame a 60 fps recording
-keeps. The interval is half a tick, not a whole one, because deliveries land on vsync: a whole
-tick rounds up to 20.8 ms at 240 Hz and the capture would fall to 48 fps. Half a tick rounded up
-to a vsync is under a tick at every refresh rate, and below 120 Hz it is one vsync, which changes
-nothing. Older Windows rejects the property and keeps the old behaviour. *To measure:* DWM's 3D
-share and the recorder's, on a 144 Hz or 240 Hz panel, against the same build with the line
-removed.
+**WGC is not rate-capped, and that is measured.** It looks as though it should be: every delivery is
+DWM copying the whole screen into the pool on the 3D engine the game is using, and the natural
+reading is that a 240 Hz panel makes four copies for every frame a 60 fps recording keeps. It does
+not. On Windows 11 build 26200, a 240 Hz PG27AQDM with a full-screen animation redrawing every
+vsync, WGC delivered 60 frames a second with no `MinUpdateInterval` set — and setting it to half a
+tick (8.3 ms) *raised* that to 120, the pool full on every tick: twice the copies, DWM's 3D share
+up about half a point, for no frame the recorder keeps. Leave the property alone unless a machine
+is measured that delivers faster than the tick by default.
 
 The pool is also **drained to the newest frame** on every tick. It holds two, `TryGetNextFrame`
 hands them over oldest first, and taking one per tick meant encoding a picture a refresh behind

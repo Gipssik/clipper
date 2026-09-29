@@ -136,7 +136,7 @@ impl Pipeline {
 
         let tier = config.tier();
         let gpu = d3d::create(Some(monitor.handle))?;
-        let capture = capture::Capture::start(&gpu, monitor.handle, format, tier.fps)?;
+        let capture = capture::Capture::start(&gpu, monitor.handle, format)?;
         let src = capture.size();
 
         // A tier of 0 means "whatever the display is".

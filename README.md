@@ -37,6 +37,7 @@ Nothing here phones home, there is no account, and no clip leaves your disk unle
 - [Instant replay](#instant-replay)
   - [Buttons on your wheel](#buttons-on-your-wheel)
   - [Recording on demand](#recording-on-demand)
+- [Updates](#updates)
 - [Settings](#settings)
 - [Notes](#notes)
 - [License](#license)
@@ -275,6 +276,7 @@ game goes to one shared **Desktop** folder rather than getting a folder of its o
 | **Quality** | 720p60 / 1080p60 / **1080p HQ** / 1440p60 / native. The panel quotes megabytes-per-minute for each, because that is the number you recognise from your clips folder. |
 | **Screen** | Which display to record. |
 | **When to record** | Only in games, or always. |
+| **Record only the game** | On by default, in *Only in games* mode. A game running in a window is cropped out of the screen and scaled up to fill the clip — no title bar, taskbar or desktop around it — and followed if you move or resize it. A window of another shape gets black bars rather than being stretched. It is the same capture, cropped in the step that already scales it, so there is no second capture to pay for. A full-screen game is unaffected. |
 | **Desktop audio** | Everything your PC plays, on every output — the game on your speakers and a call on your headset both end up in the clip. Clipper's own sounds are left out, so the save chime and clips you preview never do. About 24 KB/s. |
 | **Microphone** | Mixed into the *same* track as the game, with an optional boost for when Windows' own level runs out at 100%. One track, because most places you post a clip play the first one and silently ignore the rest. |
 | **Tell me when a clip is saved or a recording starts** | A silent Windows toast. The hotkey gets pressed while you are looking at a game, where Clipper's own toast is somewhere behind it. A recording announces its start too, because the hotkey toggles and nothing else over a game says which way it went. |
@@ -350,6 +352,29 @@ new one.
 
 ---
 
+## Updates
+
+Clipper checks this repository's [releases](https://github.com/Gipssik/clipper/releases) when it
+starts and every six hours after — it lives in the tray for days, so a check at launch alone would
+miss a release by a week. The check is a few kilobytes from GitHub's API and carries nothing about
+you or your clips.
+
+When there is a newer version it says so — in the window, or with one Windows notification if it is
+sitting in the tray — shows the release notes, and **waits**. Nothing is downloaded until you press
+**Update now**, because the download is about 130 MB and installing restarts the app, which starts
+the replay buffer over. **Later** leaves an **Update** button in the titlebar; **Skip this version**
+stays quiet until the next one.
+
+| You run | What updating does |
+| --- | --- |
+| **The installer** | Downloads the new Setup, closes Clipper, installs over it in place and starts it again. Settings, presets and clips are untouched. |
+| **The portable exe** | Downloads the new portable exe into the same folder as the one you ran (`Clipper 3.3.1.exe` becomes `Clipper 3.4.0.exe`), restarts into it and deletes the old one. *Start with Windows* follows it. |
+| **From source** | Nothing to replace — the prompt links the release page. |
+
+Every download is checked against the SHA-256 GitHub recorded when the release was uploaded, and one
+that does not match is thrown away rather than run. Turn **Check for updates** off in Settings to
+stop the background checks; **Check now** beside it still works.
+
 ## Settings
 
 The **⚙** button in the titlebar. Everything saves as you change it.
@@ -363,6 +388,7 @@ The **⚙** button in the titlebar. Everything saves as you change it.
 | **Play preview on hover** | Turn off if scrolling a large folder feels heavy. |
 | **Thumbnail frame** | Which second of each clip to grab its still from. Bump it up if your clips open on a black intro or a loading screen. |
 | **Start with Windows** | Launches Clipper when you sign in, straight to the tray — no window. Worth it with instant replay on, since the buffer only reaches back as far as the recorder has been running. |
+| **Check for updates** | Asks GitHub for a newer release at launch and every six hours. See [Updates](#updates). |
 
 ### Replay & recording
 

@@ -2119,6 +2119,8 @@ const replayQualityTip  = document.getElementById('replay-quality-tip');
 const replayMonitorSel  = document.getElementById('replay-monitor-select');
 const replayModeSeg     = document.getElementById('replay-mode-seg');
 const replayModeTip     = document.getElementById('replay-mode-tip');
+const replayGameWinField = document.getElementById('replay-gamewindow-field');
+const replayGameWinSw   = document.getElementById('replay-gamewindow-switch');
 const replayHotkeyValue = document.getElementById('replay-hotkey-value');
 const replayHotkeyBtn   = document.getElementById('replay-hotkey-btn');
 const replayHotkeyWarn  = document.getElementById('replay-hotkey-warn');
@@ -2259,6 +2261,10 @@ function applyReplayUi() {
   replayModeTip.textContent = c.recordMode === 'game'
     ? 'Starts when something takes over the whole screen and stops when you alt-tab back. Nothing runs while you are just at the desktop.'
     : 'Always buffering while Clipper is open. Catches things outside games, and keeps a slice of your GPU busy the whole time.';
+  // Absent in a config written before the setting existed, where the daemon defaults it on.
+  replayGameWinSw.classList.toggle('on', c.gameWindowOnly !== false);
+  // After the replay switch has had its say: this is off with replay off *or* outside game mode.
+  if (c.recordMode !== 'game') replayGameWinField.classList.add('off');
 
   replayHotkeyValue.textContent = c.hotkey;
   renderHotkeyWarning();
@@ -2671,6 +2677,7 @@ function setReplayStatus(text, live, warn) {
 
 replaySwitch.addEventListener('click', () => patchReplay({ enabled: !replayConfig.enabled }));
 replayPerGameSw.addEventListener('click', () => patchReplay({ perGameSubfolder: !replayConfig.perGameSubfolder }));
+replayGameWinSw.addEventListener('click', () => patchReplay({ gameWindowOnly: replayConfig.gameWindowOnly === false }));
 // Spread rather than replace: the audio object has three keys now, and writing one of them as a
 // fresh object would silently drop the other two.
 replayAudioSw.addEventListener('click', () =>
@@ -2943,6 +2950,7 @@ api.onCaptureEvent((event) => {
       } else if (event.recording) {
         const size = event.size ? event.size.width + '×' + event.size.height : '';
         const bits = [`Buffering ${Math.round((event.bufferedMs || 0) / 1000)}s of ${size} on ${event.monitor}`];
+        if (event.gameWindow) bits.push(`game window only (${event.gameWindow.width}×${event.gameWindow.height})`);
         if (event.toneMap) bits.push('HDR tone mapped');
         if (event.fps) bits.push(`${event.fps} fps`);
         setReplayStatus(bits.join(' · '), true);
@@ -3057,4 +3065,214 @@ api.onWindowAwake((awake) => {
   // Both of these keep a video decoder busy for nobody.
   stopHoverPreview();
   if (previewVideo && !previewVideo.paused) previewVideo.pause();
+});
+
+// ── Updates ───────────────────────────────────────────────────────────────────
+// The check and the download belong to the main process, which keeps doing them with the window
+// closed to the tray; this is the prompt, the progress and the line in Settings. See "Updates" in
+// main.js. Nothing here downloads on its own — every step past "there is a new version" is a click.
+const updateBtn        = document.getElementById('update-btn');
+const updateOverlay    = document.getElementById('update-overlay');
+const updateSubject    = document.getElementById('update-subject');
+const updateNotes      = document.getElementById('update-notes');
+const updateLine       = document.getElementById('update-line');
+const updateBarWrap    = document.getElementById('update-bar-wrap');
+const updateBar        = document.getElementById('update-bar');
+const updateSkipBtn    = document.getElementById('update-skip');
+const updateLaterBtn   = document.getElementById('update-later');
+const updateGoBtn      = document.getElementById('update-go');
+const updateCloseBtn   = document.getElementById('update-close-btn');
+const updateCheckRow   = document.getElementById('updatecheck-row');
+const updateCheckSw    = document.getElementById('updatecheck-switch');
+const updateStatusVal  = document.getElementById('update-status-value');
+const updateCheckBtn   = document.getElementById('update-check-btn');
+
+let updateInfo = null;
+// The version already put in front of the user this session. Once is an offer; every six hours
+// would be nagging, and the titlebar button is there for coming back to it.
+let updatePrompted = '';
+// "Check now" was pressed, so the answer is shown whatever it is — even for a skipped version.
+let updateAsked = false;
+
+const updateMB = (bytes) => Math.round((bytes || 0) / 1048576) + ' MB';
+
+// Release notes are Markdown written for the release page: headings, paragraphs, lists, bold and
+// code. Just enough of it to read well here — escaped first, so nothing in a release body can
+// become markup, and links keep their words but not their targets.
+function releaseNotesHtml(md) {
+  const esc = (t) => t.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const inline = (t) => esc(t
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1'))
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>');
+  const out = [];
+  let para = [], list = null;
+  const endPara = () => { if (para.length) out.push('<p>' + inline(para.join(' ')) + '</p>'); para = []; };
+  const endList = () => { if (list) out.push('<ul>' + list.map(i => '<li>' + inline(i) + '</li>').join('') + '</ul>'); list = null; };
+  for (const raw of String(md || '').replace(/\r/g, '').split('\n')) {
+    const line = raw.trim().replace(/^>\s?/, '');
+    const heading = line.match(/^#{1,6}\s+(.*)$/);
+    const item = line.match(/^[-*]\s+(.*)$/);
+    if (!line) { endPara(); endList(); }
+    else if (heading) { endPara(); endList(); out.push('<h4>' + inline(heading[1]) + '</h4>'); }
+    else if (item) { endPara(); (list = list || []).push(item[1]); }
+    else if (list && /^\s{2,}/.test(raw)) list[list.length - 1] += ' ' + line;
+    else { endList(); para.push(line); }
+  }
+  endPara(); endList();
+  return out.join('') || '<p>This release came without notes.</p>';
+}
+
+function updateSettingsText(s) {
+  const pct = s.size ? Math.floor((s.received / s.size) * 100) : 0;
+  switch (s.status) {
+    case 'checking':    return `Clipper ${s.current} — checking…`;
+    case 'current':     return `Clipper ${s.current} — the newest version`;
+    case 'available':   return `Clipper ${s.current} — ${s.version} is available`;
+    case 'downloading': return `Downloading Clipper ${s.version}… ${pct}%`;
+    case 'ready':       return `Clipper ${s.version} is downloaded and ready to install`;
+    case 'installing':  return `Installing Clipper ${s.version}…`;
+    case 'error':       return `Clipper ${s.current} — ${s.error}`;
+    default:            return `Clipper ${s.current}`;
+  }
+}
+
+// What happens when the button is pressed, in the words of the install it happens to.
+function updateHowText(s) {
+  if (s.kind === 'portable') {
+    return `Saved beside this copy as ${s.target}. Clipper restarts into it and deletes ${s.replacing}.`;
+  }
+  return 'Clipper closes, the installer updates it in place, and it starts again.';
+}
+
+function renderUpdate() {
+  const s = updateInfo;
+  if (!s) return;
+  const busy = ['checking', 'downloading', 'installing'].includes(s.status);
+  const pending = ['downloading', 'ready', 'installing'].includes(s.status)
+    || (s.status === 'available' && s.version !== s.skipped);
+  const pct = s.size ? Math.floor((s.received / s.size) * 100) : 0;
+
+  document.body.classList.toggle('update-ready', pending);
+  updateBtn.textContent = s.status === 'downloading' ? `Update ${pct}%`
+    : s.status === 'ready' ? 'Restart to update' : 'Update';
+  updateBtn.title = `Clipper ${s.version} is available`;
+
+  updateCheckSw.classList.toggle('on', s.check !== false);
+  updateStatusVal.textContent = updateSettingsText(s);
+  updateCheckBtn.disabled = busy;
+
+  if (!s.version) return;
+  updateSubject.textContent = `Clipper ${s.current} → ${s.version}`;
+  // Built once per version rather than on every progress tick, so a download does not keep
+  // resetting the scroll position of the notes being read.
+  if (updateNotes.dataset.version !== s.version) {
+    updateNotes.dataset.version = s.version;
+    updateNotes.innerHTML = releaseNotesHtml(s.notes);
+  }
+
+  const canInstall = s.hasAsset && s.kind !== 'source';
+  let line = '', skip = '', later = 'Later', go = '', bar = false, error = false;
+  switch (s.status) {
+    case 'downloading':
+      line = `Downloading… ${updateMB(s.received)} of ${updateMB(s.size)}. You can close this; it carries on.`;
+      later = 'Hide'; go = 'Cancel'; bar = true;
+      break;
+    case 'ready':
+      line = updateHowText(s) + ' The replay buffer starts over'
+        + (recording.active ? ', and the recording in progress is stopped and saved.' : '.');
+      go = 'Restart and update';
+      break;
+    case 'installing':
+      line = 'Closing Clipper to update…'; later = ''; bar = true;
+      break;
+    case 'error':
+      line = s.error; error = true; skip = 'Release page'; go = canInstall ? 'Try again' : '';
+      later = 'Close';
+      break;
+    default:
+      skip = 'Skip this version';
+      if (s.kind === 'source') {
+        line = 'Running from source, so there is nothing here to replace — pull and rebuild, or get the build from the release page.';
+        go = 'Release page';
+      } else if (!s.hasAsset) {
+        line = 'This release has no build for this kind of install yet.';
+        go = 'Release page';
+      } else {
+        line = `${updateMB(s.size)} download. ` + updateHowText(s);
+        go = 'Update now';
+      }
+  }
+  updateLine.textContent = line;
+  updateLine.classList.toggle('error', error);
+  updateBarWrap.classList.toggle('show', bar);
+  updateBar.style.width = (s.status === 'installing' ? 100 : pct) + '%';
+  for (const [btn, label] of [[updateSkipBtn, skip], [updateLaterBtn, later], [updateGoBtn, go]]) {
+    btn.textContent = label;
+    btn.style.display = label ? '' : 'none';
+  }
+}
+
+function openUpdateModal() {
+  if (!updateInfo || !updateInfo.version) return;
+  renderUpdate();
+  updateOverlay.classList.add('open');
+}
+function closeUpdateModal() {
+  updateOverlay.classList.remove('open');
+}
+
+api.onUpdateState((s) => {
+  updateInfo = s;
+  renderUpdate();
+  if (s.status === 'available' && (updateAsked || (s.version !== s.skipped && updatePrompted !== s.version))) {
+    updatePrompted = s.version;
+    openUpdateModal();
+  }
+  if (updateAsked && ['current', 'error', 'available'].includes(s.status)) {
+    updateAsked = false;
+    if (s.status === 'current') showToast(`Clipper ${s.current} is the newest version`, 'success');
+    if (s.status === 'error') showToast(s.error, 'error', 4000);
+  }
+});
+// From the tray menu and from the notification shown while the window was hidden.
+api.onUpdateShow(openUpdateModal);
+api.updateState().then((s) => { updateInfo = s; renderUpdate(); });
+
+updateBtn.addEventListener('click', () => {
+  if (updateInfo && updateInfo.status === 'ready') api.installUpdate();
+  else openUpdateModal();
+});
+updateGoBtn.addEventListener('click', () => {
+  const s = updateInfo;
+  if (!s) return;
+  if (s.status === 'downloading') api.cancelUpdate();
+  else if (s.status === 'ready') api.installUpdate();
+  else if (s.hasAsset && s.kind !== 'source') api.downloadUpdate();
+  else api.openUpdatePage();
+});
+updateSkipBtn.addEventListener('click', () => {
+  if (updateInfo && updateInfo.status === 'error') { api.openUpdatePage(); return; }
+  if (updateInfo) api.skipUpdate(updateInfo.version);
+  closeUpdateModal();
+});
+updateLaterBtn.addEventListener('click', closeUpdateModal);
+updateCloseBtn.addEventListener('click', closeUpdateModal);
+updateOverlay.addEventListener('click', e => { if (e.target === updateOverlay) closeUpdateModal(); });
+// Capture phase, so Escape closes this and not the Settings dialog it may be sitting on.
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && updateOverlay.classList.contains('open')) {
+    e.stopPropagation();
+    closeUpdateModal();
+  }
+}, true);
+
+updateCheckRow.addEventListener('click', async () => {
+  updateInfo = await api.setUpdateCheck(!(updateInfo && updateInfo.check !== false));
+  renderUpdate();
+});
+updateCheckBtn.addEventListener('click', () => {
+  updateAsked = true;
+  api.checkUpdate();
 });

@@ -530,37 +530,37 @@
   .preset-plan li.skip::before { content: '·'; color: var(--text3); }
 
   /* ── Encode modal ── */
-  #encode-overlay, #preset-overlay {
+  #encode-overlay, #preset-overlay, #update-overlay {
     position: fixed; inset: 0; z-index: 250;
     background: rgba(10,10,11,0.72);
     backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
     display: none; align-items: center; justify-content: center; padding: 20px;
   }
-  #encode-overlay.open, #preset-overlay.open { display: flex; }
+  #encode-overlay.open, #preset-overlay.open, #update-overlay.open { display: flex; }
 
-  #encode-modal, #preset-modal {
+  #encode-modal, #preset-modal, #update-modal {
     background: var(--surface); border: 1px solid var(--border2);
     border-radius: 14px; width: 780px; max-width: 100%; max-height: 90vh;
     display: flex; flex-direction: column; overflow: hidden;
     box-shadow: 0 32px 80px rgba(0,0,0,0.7);
   }
 
-  #encode-header, #preset-header {
+  #encode-header, #preset-header, #update-header {
     display: flex; align-items: center; gap: 12px;
     padding: 17px 24px; border-bottom: 1px solid var(--border); flex-shrink: 0;
   }
-  #encode-title, #preset-title { font-size: calc(14px * var(--font-scale)); font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); white-space: nowrap; }
-  #encode-subject, #preset-subject { font-size: calc(12.5px * var(--font-scale)); color: var(--text2); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  #encode-close-btn, #preset-close-btn {
+  #encode-title, #preset-title, #update-title { font-size: calc(14px * var(--font-scale)); font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); white-space: nowrap; }
+  #encode-subject, #preset-subject, #update-subject { font-size: calc(12.5px * var(--font-scale)); color: var(--text2); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #encode-close-btn, #preset-close-btn, #update-close-btn {
     width: 28px; height: 28px; border: none; background: var(--surface2); cursor: pointer;
     color: var(--text2); display: flex; align-items: center; justify-content: center;
     border-radius: 6px; transition: background 0.15s, color 0.15s; flex-shrink: 0;
   }
-  #encode-close-btn:hover, #preset-close-btn:hover { background: var(--danger); color: #fff; }
+  #encode-close-btn:hover, #preset-close-btn:hover, #update-close-btn:hover { background: var(--danger); color: #fff; }
 
-  #encode-body, #preset-body { padding: 22px 24px 24px; overflow-y: auto; flex: 1; }
-  #encode-body::-webkit-scrollbar, #preset-body::-webkit-scrollbar { width: 6px; }
-  #encode-body::-webkit-scrollbar-thumb, #preset-body::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+  #encode-body, #preset-body, #update-body { padding: 22px 24px 24px; overflow-y: auto; flex: 1; }
+  #encode-body::-webkit-scrollbar, #preset-body::-webkit-scrollbar, #update-body::-webkit-scrollbar { width: 6px; }
+  #encode-body::-webkit-scrollbar-thumb, #preset-body::-webkit-scrollbar-thumb, #update-body::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
 
   /* Source summary */
   #encode-source {
@@ -719,7 +719,7 @@
   .enc-row { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
 
   /* Estimate footer */
-  #encode-footer, #preset-footer {
+  #encode-footer, #preset-footer, #update-footer {
     flex-shrink: 0; border-top: 1px solid var(--border);
     padding: 17px 24px; display: flex; align-items: center; gap: 16px;
   }
@@ -730,18 +730,56 @@
   #est-delta.grow { color: var(--danger); }
   #encode-estimate .est-note { font-size: calc(11.5px * var(--font-scale)); line-height: 1.5; color: var(--text2); margin-top: 5px; }
 
-  #encode-save-new, #encode-replace, #preset-cancel, #preset-save {
+  #encode-save-new, #encode-replace, #preset-cancel, #preset-save, #update-skip, #update-later, #update-go {
     min-height: 40px; padding: 0 20px; border: none; border-radius: 6px;
     font-family: 'Syne', sans-serif; font-weight: 700; font-size: calc(12.5px * var(--font-scale));
     letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer;
     transition: background 0.15s, transform 0.1s; flex-shrink: 0;
   }
-  #encode-save-new, #preset-cancel { background: var(--surface2); border: 1px solid var(--border2); color: var(--text); }
-  #encode-save-new:hover, #preset-cancel:hover { background: var(--border2); }
-  #encode-replace, #preset-save { background: var(--accent); color: #0a0a0b; }
-  #encode-replace:hover, #preset-save:hover { background: var(--accent2); }
+  #encode-save-new, #preset-cancel, #update-skip, #update-later { background: var(--surface2); border: 1px solid var(--border2); color: var(--text); }
+  #encode-save-new:hover, #preset-cancel:hover, #update-skip:hover, #update-later:hover { background: var(--border2); }
+  #encode-replace, #preset-save, #update-go { background: var(--accent); color: #0a0a0b; }
+  #encode-replace:hover, #preset-save:hover, #update-go:hover { background: var(--accent2); }
   #encode-save-new:active, #encode-replace:active,
-  #preset-cancel:active, #preset-save:active { transform: scale(0.97); }
+  #preset-cancel:active, #preset-save:active,
+  #update-skip:active, #update-later:active, #update-go:active { transform: scale(0.97); }
+
+  /* ── Update modal ── the chrome is the encode modal's, through the selectors above. Above
+     Settings, because "Check now" in Settings is one of the ways it opens. */
+  #update-overlay { z-index: 270; }
+  #update-modal { width: 600px; }
+  /* The explanation gets a row of its own: it says what the button is about to do, and squeezed
+     beside three buttons it was a column one word wide. */
+  #update-footer { flex-wrap: wrap; row-gap: 14px; }
+  #update-info { flex: 1 1 100%; min-width: 0; }
+  #update-later { margin-left: auto; }
+  #update-line { font-size: calc(12px * var(--font-scale)); line-height: 1.5; color: var(--text2); }
+  #update-line.error { color: #e0a33e; }
+  #update-bar-wrap { height: 5px; margin-top: 9px; background: var(--surface3); border-radius: 3px; overflow: hidden; display: none; }
+  #update-bar-wrap.show { display: block; }
+  #update-bar { height: 100%; width: 0%; background: var(--accent); border-radius: 3px; transition: width 0.25s linear; }
+  #update-notes { font-size: calc(12.5px * var(--font-scale)); line-height: 1.65; color: var(--text2); }
+  #update-notes h4 {
+    margin: 18px 0 6px; font-size: calc(12px * var(--font-scale)); font-weight: 700;
+    letter-spacing: 0.08em; text-transform: uppercase; color: var(--text);
+  }
+  #update-notes h4:first-child { margin-top: 0; }
+  #update-notes p { margin: 0 0 10px; }
+  #update-notes ul { margin: 0 0 10px; padding-left: 18px; }
+  #update-notes strong { color: var(--text); font-weight: 700; }
+  #update-notes code { font-family: 'DM Mono', monospace; font-size: 0.92em; color: var(--text); }
+  /* In the titlebar while an update is waiting, so "Later" does not mean "never again". */
+  #update-btn {
+    -webkit-app-region: no-drag; display: none; align-items: center; gap: 7px;
+    padding: 5px 11px; background: var(--surface2); border: 1px solid var(--accent);
+    color: var(--accent); border-radius: 6px; cursor: pointer;
+    font-family: 'Syne', sans-serif; font-size: calc(11px * var(--font-scale)); font-weight: 600;
+    letter-spacing: 0.04em; transition: background 0.15s, color 0.15s;
+    font-variant-numeric: tabular-nums;
+  }
+  body.update-ready #update-btn { display: flex; }
+  #update-btn:hover { background: var(--accent); color: #0a0a0b; }
+  #update-check-btn:disabled { opacity: 0.4; pointer-events: none; }
 
   /* ── Determinate progress ── */
   #prog-bar-wrap {
@@ -892,6 +930,7 @@
   <div class="title-sep"></div>
   <span id="root-folder-display">No folder selected</span>
   <div class="title-spacer"></div>
+  <button id="update-btn" title="An update is available">Update</button>
   <button id="rec-btn" title="Start recording"><span class="rec-dot"></span><span id="rec-btn-text">Record</span></button>
   <button id="change-folder-btn">Change Folder</button>
   <button class="wc-btn" id="settings-btn" title="Settings">
@@ -1155,6 +1194,29 @@
   </div>
 </div>
 
+<!-- Update Modal -->
+<div id="update-overlay">
+  <div id="update-modal">
+    <div id="update-header">
+      <span id="update-title">Update</span>
+      <span id="update-subject"></span>
+      <button id="update-close-btn">
+        <svg width="10" height="10" viewBox="0 0 10 10"><line x1="0" y1="0" x2="10" y2="10" stroke="currentColor" stroke-width="1.5"/><line x1="10" y1="0" x2="0" y2="10" stroke="currentColor" stroke-width="1.5"/></svg>
+      </button>
+    </div>
+    <div id="update-body"><div id="update-notes"></div></div>
+    <div id="update-footer">
+      <div id="update-info">
+        <div id="update-line"></div>
+        <div id="update-bar-wrap"><div id="update-bar"></div></div>
+      </div>
+      <button id="update-skip">Skip this version</button>
+      <button id="update-later">Later</button>
+      <button id="update-go">Update now</button>
+    </div>
+  </div>
+</div>
+
 <!-- Settings Modal -->
 <div id="settings-overlay">
   <div id="settings-modal">
@@ -1238,6 +1300,28 @@
           </div>
         </div>
 
+        <div class="set-group">
+          <div class="set-group-label">Updates</div>
+
+          <div class="enc-field">
+            <div class="set-toggle-row" id="updatecheck-row">
+              <div class="set-toggle-text">
+                <div class="enc-label" style="margin-bottom:6px"><span>Check for updates</span></div>
+                <div class="enc-tip" style="margin-top:0">Asks GitHub for the newest release when Clipper starts and every six hours after &mdash; a few kilobytes, and nothing about you or your clips goes with it. When there is one, Clipper says so and waits: nothing is downloaded or installed until you choose to, since updating restarts the app and the replay buffer starts over.</div>
+              </div>
+              <div class="set-switch on" id="updatecheck-switch"></div>
+            </div>
+          </div>
+
+          <div class="enc-field" style="margin-bottom:0">
+            <div class="enc-label"><span>Version</span></div>
+            <div class="replay-row">
+              <span class="replay-value" id="update-status-value" style="direction:ltr">Clipper</span>
+              <button id="update-check-btn">Check now</button>
+            </div>
+          </div>
+        </div>
+
       </div>
 
       <div class="set-panel" data-panel="replay">
@@ -1304,6 +1388,16 @@
                 <button data-mode="always">Always</button>
               </div>
               <div class="enc-tip" id="replay-mode-tip"></div>
+            </div>
+
+            <div class="enc-field for-replay" id="replay-gamewindow-field">
+              <div class="set-toggle-row" id="replay-gamewindow-row">
+                <div class="set-toggle-text">
+                  <div class="enc-label" style="margin-bottom:6px"><span>Record only the game</span></div>
+                  <div class="enc-tip" style="margin-top:0">When a game is running in a window rather than full-screen, records just the inside of that window and scales it up to fill the clip &mdash; no title bar, taskbar or desktop around it. It follows the window if you move or resize it, and a window of a different shape gets black bars rather than being stretched. No second capture and no extra pass: it is the same picture, cropped in the step that already scales it. Anything you drag over the game is still recorded, since it is on top of the picture. Only in games mode; applies straight away and keeps the buffer.</div>
+                </div>
+                <div class="set-switch on" id="replay-gamewindow-switch"></div>
+              </div>
             </div>
 
             <div class="enc-field for-replay">

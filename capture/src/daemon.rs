@@ -104,6 +104,12 @@ struct Pipeline {
     panel: display::DisplayHdr,
     /// Capture size at build time; the converter and encoder are sized against it.
     src: (i32, i32),
+    /// The display being captured, which `foreground::game_area` measures a window against.
+    monitor: windows::Win32::Graphics::Gdi::HMONITOR,
+    /// The game window to crop to, as a raw handle, or 0 for the whole screen. Set by the loop from
+    /// what is in front; read every tick, because a window being dragged or resized moves far
+    /// faster than the foreground poll.
+    game_window: isize,
     tone_map: bool,
     encoder_name: String,
     bitrate: u32,
@@ -225,6 +231,8 @@ impl Pipeline {
             fps: tier.fps,
             panel,
             src: (src.Width, src.Height),
+            monitor: monitor.handle,
+            game_window: 0,
             tone_map,
             encoder_name,
             bitrate: tier.bitrate,
@@ -302,12 +310,29 @@ impl Pipeline {
     fn tick(&mut self, mut rec: Option<&mut Recording>) -> crate::Fallible<()> {
         let scheduled = self.ticker.wait();
 
+        // Where the game's window is this tick. A handful of user32 calls that send no messages, so
+        // a hung game cannot stall the recorder here; see `foreground::game_area`.
+        let area = if self.game_window != 0 {
+            foreground::game_area(self.game_window, self.monitor, self.src)
+        } else {
+            None
+        };
+        let was_cropped = self.converter.crop().is_some();
+        let recropped = self.converter.set_crop(&self.gpu, area)?;
+        if recropped && was_cropped != area.is_some() {
+            crate::lifecycle::log(&match area {
+                Some([_, _, w, h]) => format!("recording only the game's window ({w}x{h})"),
+                None => "recording the whole screen".to_string(),
+            });
+        }
+
         // Converted only when the screen changed; a repeated frame is a copy of the last
         // conversion. See "Repeated frames are copied, not converted" in DESIGN.md — including why
-        // handing the encoder the same surface twice is not the cheaper option it looks like.
+        // handing the encoder the same surface twice is not the cheaper option it looks like. A
+        // crop that moved is a change too: the last conversion shows the old rectangle.
         let fresh = self.capture.pump(&self.gpu)?;
         if let Some(texture) = self.capture.latest() {
-            if fresh {
+            if fresh || recropped {
                 self.converter.convert(&self.gpu, texture)?;
             } else {
                 self.converter.repeat(&self.gpu);
@@ -994,6 +1019,24 @@ pub fn run(mut config: Config, options: Options) -> crate::Fallible<serde_json::
             }
         }
 
+        // Only the game, not the desktop around it, while a game that is not full-screen is in
+        // front. Only in `game` mode, where "what is in front is a game" is the reason the recorder
+        // is running at all; in `always` mode the screen is the subject. A recording holding the
+        // pipeline up while something else is in front gets the whole screen, as it always has.
+        let game_window = if config.enabled
+            && config.record_mode == "game"
+            && config.game_window_only
+            && front.worth_recording
+            && !front.fullscreen
+        {
+            front.window
+        } else {
+            0
+        };
+        if let Some(p) = &mut pipeline {
+            p.game_window = game_window;
+        }
+
         let now_buffering = pipeline.as_ref().is_some_and(|p| p.ring.is_some());
         if now_buffering != buffering {
             buffering = now_buffering;
@@ -1351,6 +1394,11 @@ fn status(
         "encoderSettings": pipeline.map(|p| p.encoder.applied.join(" ")),
         "size": pipeline.map(|p| serde_json::json!({ "width": p.width, "height": p.height })),
         "resampling": pipeline.map(|p| p.converter.resampling),
+        "gameWindowOnly": config.game_window_only,
+        // The window being cropped to right now, in capture pixels. Null while the whole screen is.
+        "gameWindow": pipeline
+            .and_then(|p| p.converter.crop())
+            .map(|[_, _, w, h]| serde_json::json!({ "width": w, "height": h })),
         "bitrate": tier.bitrate,
         "maxBitrate": tier.max_bitrate,
         "toneMap": pipeline.map(|p| p.tone_map),

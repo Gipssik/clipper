@@ -54,6 +54,14 @@ struct Params {
     peak: f32,
     hdr: u32,
     resampling: u32,
+    /// The part of the source that is the picture, in source pixels. The whole source unless the
+    /// recorder is cropping to a game's window.
+    crop_origin: [f32; 2],
+    crop_size: [f32; 2],
+    /// Where that picture lands in the destination, as a fraction of it. The whole frame unless a
+    /// crop of a different shape has to be letterboxed to keep its aspect ratio.
+    view_origin: [f32; 2],
+    view_size: [f32; 2],
 }
 
 pub struct Converter {
@@ -67,6 +75,9 @@ pub struct Converter {
     srv: Option<(ID3D11ShaderResourceView, isize)>,
     width: u32,
     height: u32,
+    params: Params,
+    /// The crop in force, if any, as `[x, y, width, height]` in source pixels.
+    crop: Option<[i32; 4]>,
     pub resampling: bool,
 }
 
@@ -136,19 +147,19 @@ impl Converter {
             )?;
         }
 
-        // A few percent of slack: at 1:1 the kernel would only be a mild sharpen of pixels that
-        // are already exactly right, and sharpening something nobody scaled is not our business.
-        let resampling = src_width as f32 > width as f32 * 1.05
-            || src_height as f32 > height as f32 * 1.05;
-
-        let params = Params {
+        let mut params = Params {
             dst_size: [width as f32, height as f32],
             src_size: [src_width as f32, src_height as f32],
             white_scale: if hdr { white_scale.max(1.0) } else { 1.0 },
             peak: peak.max(1.0),
             hdr: hdr as u32,
-            resampling: resampling as u32,
+            resampling: 0,
+            crop_origin: [0.0, 0.0],
+            crop_size: [src_width as f32, src_height as f32],
+            view_origin: [0.0, 0.0],
+            view_size: [1.0, 1.0],
         };
+        let resampling = fit_view(&mut params);
         let mut constants = None;
         unsafe {
             gpu.device.CreateBuffer(
@@ -177,8 +188,45 @@ impl Converter {
             srv: None,
             width,
             height,
+            params,
+            crop: None,
             resampling,
         })
+    }
+
+    /// Records only `crop` of the source from the next conversion on, scaled to fill the frame
+    /// and letterboxed where its shape differs; None goes back to the whole source. Returns true
+    /// when that changed anything, which means the last conversion no longer shows what should be
+    /// recorded and the next frame has to be converted rather than repeated.
+    ///
+    /// A constant-buffer write and nothing else. The encoder's size is fixed for the life of the
+    /// pipeline — a replay ring and a recording cannot change resolution mid-stream — so a window
+    /// being resized, or a game going from windowed to full-screen, is absorbed here instead of by
+    /// a rebuild that would cost the buffer.
+    pub fn set_crop(&mut self, gpu: &Gpu, crop: Option<[i32; 4]>) -> Result<bool> {
+        if crop == self.crop {
+            return Ok(false);
+        }
+        let (sw, sh) = (self.params.src_size[0], self.params.src_size[1]);
+        let [x, y, w, h] = match crop {
+            Some([x, y, w, h]) => {
+                let x = (x as f32).clamp(0.0, sw - 1.0);
+                let y = (y as f32).clamp(0.0, sh - 1.0);
+                [x, y, (w as f32).clamp(1.0, sw - x), (h as f32).clamp(1.0, sh - y)]
+            }
+            None => [0.0, 0.0, sw, sh],
+        };
+        self.params.crop_origin = [x, y];
+        self.params.crop_size = [w, h];
+        self.resampling = fit_view(&mut self.params);
+        write_constants(gpu, &self.constants, &self.params)?;
+        self.crop = crop;
+        Ok(true)
+    }
+
+    /// The crop in force, as `[x, y, width, height]` in source pixels.
+    pub fn crop(&self) -> Option<[i32; 4]> {
+        self.crop
     }
 
     /// The surface the last `convert()` wrote. Valid until `SURFACES` more conversions have run.
@@ -261,6 +309,40 @@ impl Converter {
         self.srv = Some((srv.clone(), key));
         Ok(srv)
     }
+}
+
+/// Places the crop in the destination at the largest size that keeps its shape, centred, and says
+/// whether that is a downscale worth the real filter.
+///
+/// A few percent of slack on the filter: at 1:1 the kernel would only be a mild sharpen of pixels
+/// that are already exactly right, and sharpening something nobody scaled is not our business. An
+/// upscale — a small window filling a bigger frame — takes the sampler's bilinear, which is what
+/// every player would do to it anyway.
+fn fit_view(params: &mut Params) -> bool {
+    let [cw, ch] = params.crop_size;
+    let [dw, dh] = params.dst_size;
+    // The whole source fills the whole frame, as it always has. Its size was derived from the
+    // source's shape to begin with, so any difference is rounding, and a letterbox two pixels wide
+    // down one side of every clip would be a regression for the sake of it.
+    if params.crop_origin == [0.0, 0.0] && params.crop_size == params.src_size {
+        params.view_origin = [0.0, 0.0];
+        params.view_size = [1.0, 1.0];
+        let resampling = cw > dw * 1.05 || ch > dh * 1.05;
+        params.resampling = resampling as u32;
+        return resampling;
+    }
+    let scale = (dw / cw).min(dh / ch);
+    // Whole destination pixels, and bars of an even width, so the picture's edge lands on a chroma
+    // texel boundary rather than smearing half a pixel of colour into the bar.
+    let pw = ((cw * scale / 2.0).round() * 2.0).min(dw);
+    let ph = ((ch * scale / 2.0).round() * 2.0).min(dh);
+    let px = (((dw - pw) / 4.0).floor() * 2.0).max(0.0);
+    let py = (((dh - ph) / 4.0).floor() * 2.0).max(0.0);
+    params.view_size = [pw / dw, ph / dh];
+    params.view_origin = [px / dw, py / dh];
+    let resampling = cw > pw * 1.05 || ch > ph * 1.05;
+    params.resampling = resampling as u32;
+    resampling
 }
 
 /// Whether this GPU will let us render into NV12 planes at all. Checked up front so a driver that

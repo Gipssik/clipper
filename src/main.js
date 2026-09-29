@@ -1,6 +1,7 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, nativeImage, Notification, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Tray, Menu, nativeImage, Notification, screen, net: electronNet } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { spawn, execFileSync } = require('child_process');
 const net = require('net');
 const os = require('os');
@@ -154,9 +155,32 @@ function createWindow() {
   mainWindow.on('restore', () => awake(true));
 }
 
+// An update starts the new copy while this one is still on its way out, and a copy that asks for
+// the lock too early finds it taken and exits — so after an update there would be no Clipper at all.
+// The one being replaced says who it is in the environment, which the portable launcher passes on,
+// and the new copy waits for it to be gone before asking. Synchronous, because nothing may run
+// before the lock is settled; it is a few hundred milliseconds in practice, and never over 30 s.
+const UPDATED_FROM = 'CLIPPER_UPDATED_FROM_PID';
+(function waitForPredecessor() {
+  const pid = parseInt(process.env[UPDATED_FROM], 10);
+  delete process.env[UPDATED_FROM];
+  if (!pid) return;
+  const nap = new Int32Array(new SharedArrayBuffer(4));
+  for (const deadline = Date.now() + 30000; Date.now() < deadline;) {
+    // Signal 0 only asks whether the process exists. EPERM means it does, and is not ours to signal.
+    try { process.kill(pid, 0); } catch (e) { if (e.code !== 'EPERM') return; }
+    Atomics.wait(nap, 0, 0, 100);
+  }
+})();
+
 // Two copies would mean two capture daemons fighting over one segment directory, so the second
 // launch hands focus back to the first and exits.
-if (!app.requestSingleInstanceLock()) {
+//
+// `app.quit()` is asynchronous, and it does not cancel what is already queued for `whenReady`: the
+// turned-away copy used to go on to build a window, a tray icon and a round of ffmpeg probes before
+// the quit landed. So everything that starts the app checks `gotLock` first.
+const gotLock = app.requestSingleInstanceLock();
+if (!gotLock) {
   app.quit();
 } else {
   app.on('second-instance', () => {
@@ -169,10 +193,13 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 app.whenReady().then(() => {
+  if (!gotLock) return;
   repairAutostart();
+  removeReplacedPortable();
   createWindow();
   setupTray();
   if (captureWanted(loadCaptureConfig())) startCaptureDaemon();
+  scheduleUpdateChecks();
 
   // The settings panel's list of screens is a snapshot, and a screen switched on after boot is
   // exactly the one somebody opens the panel to pick. The daemon only watches the display it
@@ -411,6 +438,8 @@ const CAPTURE_DEFAULTS = {
   saveSound: 'chime',
   enabled: false,          // off until asked for: it costs GPU time and disk continuously
   recordMode: 'game',
+  // In game mode, a windowed game is cropped out of the screen and scaled to fill the clip.
+  gameWindowOnly: true,
   bufferSeconds: 60,
   monitor: { device: '', friendly: '' },
   quality: 'high',
@@ -697,6 +726,361 @@ function sendCaptureEvent(event) {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('capture:event', event);
 }
 
+// ── Updates ───────────────────────────────────────────────────────────────────
+// GitHub Releases is the whole update server. Every release already carries both builds (see
+// "Committing and releasing" in CLAUDE.md), and `releases/latest` answers "is there anything
+// newer" with no feed file to publish beside them. electron-updater would want a latest.yml
+// uploaded with every release and a dependency in the package, and still would not update the
+// portable build, which is half of what people download.
+//
+// So: ask the API, compare versions, and when the user says yes, download the asset for *this*
+// kind of install, check it against the SHA-256 GitHub recorded when it was uploaded, and hand over.
+//   installer — run the new Setup. It replaces this install in place and starts Clipper again.
+//   portable  — put the new exe beside this one, start it once this process has gone, and let it
+//               delete the old one (`removeReplacedPortable`).
+//   source    — nothing to replace; the prompt offers the release page instead.
+//
+// Nothing is downloaded without asking: the check is a few kilobytes of JSON, the download is
+// 130 MB, and restarting takes the replay buffer with it.
+
+const UPDATE_REPO = 'Gipssik/clipper';
+// Late enough after launch to stay out of the way of the encoder probes and the first scan.
+const UPDATE_FIRST_CHECK_MS = 20 * 1000;
+// Clipper lives in the tray for days at a time, so a check at launch alone would miss a release
+// by a week. Unauthenticated, the API allows 60 requests an hour; this spends one every six.
+const UPDATE_EVERY_MS = 6 * 60 * 60 * 1000;
+
+const update = {
+  // idle | checking | current | available | downloading | ready | installing | error
+  status: 'idle',
+  release: null,       // { version, notes, url, publishedAt, asset: { name, size, url, digest } | null }
+  received: 0,
+  error: '',
+  checkedAt: 0,
+  file: '',            // the finished, verified download
+  abort: null,
+};
+
+function updateKind() {
+  if (!app.isPackaged) return 'source';
+  return process.env.PORTABLE_EXECUTABLE_FILE ? 'portable' : 'installer';
+}
+
+// Its own key in prefs.json, owned by this process: the renderer's saves only ever write the keys
+// they name, so this survives them, and Reset in Settings leaves it alone.
+function updatePrefs() {
+  return { check: true, skipped: '', notified: '', replaced: '', ...(loadPrefs().update || {}) };
+}
+function setUpdatePrefs(patch) {
+  savePrefs({ update: { ...updatePrefs(), ...patch } });
+}
+
+// Dotted numbers compared as numbers, so 3.10.0 is newer than 3.9.2. A suffix like -beta is
+// ignored; `releases/latest` never returns a prerelease.
+function compareVersions(a, b) {
+  const parts = (v) => String(v).replace(/^v/i, '').split(/[-+]/)[0].split('.').map(n => parseInt(n, 10) || 0);
+  const x = parts(a), y = parts(b);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) {
+    const d = (x[i] || 0) - (y[i] || 0);
+    if (d) return Math.sign(d);
+  }
+  return 0;
+}
+
+// GitHub turns the spaces in `Clipper Setup 3.3.1.exe` into dots on upload, so both spellings match.
+function pickUpdateAsset(assets, kind) {
+  const pattern = kind === 'installer'
+    ? /^Clipper[ .]Setup[ .]\d[\d.]*\.exe$/i
+    : /^Clipper[ .]\d[\d.]*\.exe$/i;
+  const found = (assets || []).find(a => pattern.test(a.name || ''));
+  return found
+    ? { name: found.name, size: found.size || 0, url: found.browser_download_url, digest: found.digest || '' }
+    : null;
+}
+
+// Where the download goes. The installer is a throwaway, so %TEMP%. The portable build *is* the
+// download, so it goes where the user keeps the current one, named the way they named that — with
+// the version swapped if the name carries it, which the file electron-builder produces does.
+function updateTarget() {
+  const release = update.release;
+  if (updateKind() !== 'portable') {
+    return path.join(app.getPath('temp'), 'clipper-update', release.asset.name);
+  }
+  const current = process.env.PORTABLE_EXECUTABLE_FILE;
+  const base = path.basename(current);
+  let name = base.includes(app.getVersion())
+    ? base.split(app.getVersion()).join(release.version)
+    : `Clipper ${release.version}.exe`;
+  if (name.toLowerCase() === base.toLowerCase()) name = `Clipper ${release.version}.exe`;
+  return path.join(path.dirname(current), name);
+}
+
+function updateState() {
+  const prefs = updatePrefs();
+  const release = update.release;
+  return {
+    status: update.status,
+    current: app.getVersion(),
+    kind: updateKind(),
+    version: release ? release.version : '',
+    notes: release ? release.notes : '',
+    url: release ? release.url : '',
+    publishedAt: release ? release.publishedAt : '',
+    hasAsset: !!(release && release.asset),
+    size: release && release.asset ? release.asset.size : 0,
+    received: update.received,
+    // For the portable build, the file that will replace this one — the prompt names it.
+    target: release && release.asset && updateKind() === 'portable' ? path.basename(updateTarget()) : '',
+    replacing: updateKind() === 'portable' ? path.basename(process.env.PORTABLE_EXECUTABLE_FILE) : '',
+    error: update.error,
+    checkedAt: update.checkedAt,
+    check: prefs.check,
+    skipped: prefs.skipped,
+  };
+}
+
+let trayUpdateStatus = '';
+function sendUpdateState() {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update:state', updateState());
+  // The tray only names the status, and a download reports progress four times a second.
+  if (update.status !== trayUpdateStatus) { trayUpdateStatus = update.status; updateTray(); }
+}
+
+function showUpdatePrompt() {
+  showWindow();
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('update:show');
+}
+
+async function checkForUpdate(manual) {
+  if (['checking', 'downloading', 'ready', 'installing'].includes(update.status)) return updateState();
+  const hadNewer = update.status === 'available';
+  update.status = 'checking';
+  update.error = '';
+  sendUpdateState();
+  try {
+    const res = await electronNet.fetch(`https://api.github.com/repos/${UPDATE_REPO}/releases/latest`, {
+      headers: { Accept: 'application/vnd.github+json', 'User-Agent': `Clipper/${app.getVersion()}` },
+    });
+    if (res.status === 404) {
+      // A repository with no published release yet: nothing newer by definition.
+      update.release = null;
+      update.status = 'current';
+    } else if (!res.ok) {
+      throw new Error(res.status === 403 || res.status === 429
+        ? 'GitHub is limiting update checks from this network for the moment; try again in an hour'
+        : `GitHub answered ${res.status}`);
+    } else {
+      const data = await res.json();
+      const version = String(data.tag_name || '').replace(/^v/i, '');
+      update.release = {
+        version,
+        notes: String(data.body || ''),
+        url: String(data.html_url || `https://github.com/${UPDATE_REPO}/releases/latest`),
+        publishedAt: data.published_at || '',
+        asset: pickUpdateAsset(data.assets, updateKind()),
+      };
+      update.status = compareVersions(version, app.getVersion()) > 0 ? 'available' : 'current';
+    }
+  } catch (e) {
+    update.error = /fetch|net::|ENOTFOUND|ECONN/i.test(e.message) ? 'Could not reach GitHub' : e.message;
+    // A background check that fails offline must not take back an update it already found.
+    update.status = hadNewer && !manual ? 'available' : 'error';
+  }
+  update.checkedAt = Date.now();
+  sendUpdateState();
+  if (update.status === 'available' && !manual) notifyUpdate();
+  return updateState();
+}
+
+// When Clipper is sitting in the tray, the window's own prompt is not something anyone will see, so
+// say it once per version, in the corner. Silent for the same reason a saved replay is: this can
+// land in the middle of a game.
+function notifyUpdate() {
+  const version = update.release.version;
+  const prefs = updatePrefs();
+  if (prefs.skipped === version || prefs.notified === version) return;
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible()) return;
+  if (!Notification.isSupported()) return;
+  setUpdatePrefs({ notified: version });
+  const toast = new Notification({
+    title: `Clipper ${version} is available`,
+    body: 'Click to see what changed and update.',
+    icon: trayIcon('tray-idle.png'),
+    silent: true,
+  });
+  toast.on('click', showUpdatePrompt);
+  toast.show();
+}
+
+function scheduleUpdateChecks() {
+  const tick = () => { if (updatePrefs().check) checkForUpdate(false); };
+  setTimeout(tick, UPDATE_FIRST_CHECK_MS);
+  setInterval(tick, UPDATE_EVERY_MS);
+}
+
+async function downloadUpdate() {
+  const release = update.release;
+  // From `error` too: that is a failed download being tried again.
+  if (!release || !release.asset || !['available', 'error'].includes(update.status)
+      || compareVersions(release.version, app.getVersion()) <= 0) return updateState();
+  const asset = release.asset;
+  const dest = updateTarget();
+  const part = dest + '.part';
+  const controller = new AbortController();
+  update.abort = controller;
+  update.status = 'downloading';
+  update.received = 0;
+  update.error = '';
+  sendUpdateState();
+
+  let fh = null;
+  try {
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fh = await fs.promises.open(part, 'w');
+    const res = await electronNet.fetch(asset.url, {
+      signal: controller.signal,
+      headers: { 'User-Agent': `Clipper/${app.getVersion()}` },
+    });
+    if (!res.ok || !res.body) throw new Error(`GitHub answered ${res.status}`);
+    const hash = crypto.createHash('sha256');
+    const reader = res.body.getReader();
+    let reported = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      hash.update(value);
+      await fh.write(value);
+      update.received += value.length;
+      if (Date.now() - reported > 250) { reported = Date.now(); sendUpdateState(); }
+    }
+    await fh.close();
+    fh = null;
+    if (asset.size && update.received !== asset.size) throw new Error('The download stopped short');
+    // Every asset uploaded since mid-2025 carries one. A file that does not match it is not the
+    // one that was released, whatever happened on the way, and is never run.
+    const want = (asset.digest.match(/^sha256:([0-9a-f]{64})$/i) || [])[1];
+    if (want && hash.digest('hex') !== want.toLowerCase()) {
+      throw new Error('The download does not match the checksum GitHub has for it');
+    }
+    fs.rmSync(dest, { force: true });
+    fs.renameSync(part, dest);
+    update.file = dest;
+    update.status = 'ready';
+  } catch (e) {
+    try { if (fh) await fh.close(); } catch {}
+    try { fs.rmSync(part, { force: true }); } catch {}
+    if (controller.signal.aborted) {
+      update.status = 'available';
+    } else {
+      update.status = 'error';
+      update.error = e.code === 'EACCES' || e.code === 'EPERM'
+        ? `Cannot write to ${path.dirname(dest)} — download it from the release page instead`
+        : e.message;
+    }
+  }
+  update.abort = null;
+  sendUpdateState();
+  return updateState();
+}
+
+// The installer overwrites clipper-capture.exe, which Windows will not allow while it runs, and the
+// daemon flushes its ring on the way out. So it is stopped first and given time to go, rather
+// than left to the two-second kill in `stopCaptureDaemon`.
+function stopCaptureDaemonAndWait(ms) {
+  const proc = capture.proc || capture.dying;
+  stopCaptureDaemon();
+  if (!proc || proc.exitCode !== null) return Promise.resolve();
+  return new Promise((resolve) => { proc.once('exit', resolve); setTimeout(resolve, ms); });
+}
+
+async function installUpdate() {
+  if (update.status !== 'ready' || !update.file || !fs.existsSync(update.file)) return updateState();
+  update.status = 'installing';
+  sendUpdateState();
+  await stopCaptureDaemonAndWait(5000);
+
+  // Detached, or it would be in the job Node puts its children in and die with this process. The
+  // new copy is told to wait for this one (`waitForPredecessor`); the launcher sets its own
+  // PORTABLE_EXECUTABLE_* afresh, and a stale one must not reach a copy whose launcher did not.
+  const env = { ...process.env, [UPDATED_FROM]: String(process.pid) };
+  for (const key of Object.keys(env)) if (key.startsWith('PORTABLE_EXECUTABLE_')) delete env[key];
+  const launch = (file, args) => new Promise((resolve, reject) => {
+    const child = spawn(file, args, { detached: true, stdio: 'ignore', env });
+    child.once('spawn', () => { child.unref(); resolve(); });
+    child.once('error', reject);
+  });
+  try {
+    if (updateKind() === 'portable') {
+      const old = process.env.PORTABLE_EXECUTABLE_FILE;
+      // The old exe is left for the new copy to delete: its launcher holds it open until it has
+      // cleaned up after this process, which is after this process has gone.
+      await launch(update.file, []);
+      setUpdatePrefs({ replaced: old });
+      if (getAutostart()) {
+        try { app.setLoginItemSettings({ ...loginItem(true), path: update.file }); } catch {}
+      }
+    } else {
+      // `--updated` is electron-builder's own flag: the installer skips asking whether it may close
+      // a running Clipper, and gives it a moment to exit instead. It starts Clipper when it is done.
+      await launch(update.file, ['--updated', '--force-run']);
+    }
+  } catch (e) {
+    update.status = 'error';
+    update.error = `Could not start the update: ${e.message}`;
+    sendUpdateState();
+    if (captureWanted(loadCaptureConfig())) startCaptureDaemon();
+    return updateState();
+  }
+  quitting = true;
+  app.quit();
+  return updateState();
+}
+
+// The portable copy an update replaced, deleted by the copy that replaced it. Its launcher holds it
+// open until it has finished cleaning up its %TEMP% folder, so this retries for a minute. Only the
+// exact file the updater recorded, only an exe, and never the one running now — which is what
+// launching the old copy again after a failed update would otherwise make it.
+function removeReplacedPortable() {
+  const { replaced } = updatePrefs();
+  if (!replaced) return;
+  const self = process.env.PORTABLE_EXECUTABLE_FILE || process.execPath;
+  if (path.resolve(replaced).toLowerCase() === path.resolve(self).toLowerCase() || !/\.exe$/i.test(replaced)) {
+    setUpdatePrefs({ replaced: '' });
+    return;
+  }
+  let tries = 0;
+  const attempt = () => {
+    try {
+      fs.rmSync(replaced, { force: true });
+      setUpdatePrefs({ replaced: '' });
+      repairAutostart();
+    } catch {
+      if (++tries < 30) setTimeout(attempt, 2000);
+      else setUpdatePrefs({ replaced: '' });
+    }
+  };
+  attempt();
+}
+
+ipcMain.handle('update:state', () => updateState());
+ipcMain.handle('update:check', () => checkForUpdate(true));
+ipcMain.handle('update:download', () => downloadUpdate());
+ipcMain.handle('update:cancel', () => { if (update.abort) update.abort.abort(); return updateState(); });
+ipcMain.handle('update:install', () => installUpdate());
+ipcMain.handle('update:skip', (_, version) => {
+  setUpdatePrefs({ skipped: String(version || '') });
+  sendUpdateState();
+  return updateState();
+});
+ipcMain.handle('update:setCheck', (_, on) => {
+  setUpdatePrefs({ check: !!on });
+  sendUpdateState();
+  return updateState();
+});
+// Only ever this repository's releases; the renderer names no URL.
+ipcMain.handle('update:openPage', () =>
+  shell.openExternal(update.release ? update.release.url : `https://github.com/${UPDATE_REPO}/releases/latest`));
+
 // ── Tray ──────────────────────────────────────────────────────────────────────
 
 function trayIcon(name) {
@@ -750,6 +1134,10 @@ function updateTray() {
       click: () => sendCapture('record', { on: !taping }),
     }] : []),
     { type: 'separator' },
+    ...(['available', 'downloading', 'ready'].includes(update.status) && update.release ? [
+      { label: `Update to Clipper ${update.release.version}\u2026`, click: showUpdatePrompt },
+      { type: 'separator' },
+    ] : []),
     { label: 'Quit Clipper', click: () => { quitting = true; app.quit(); } },
   ]));
 }
@@ -1340,4 +1728,4 @@ async function runEncode(opts, sender) {
 }
 
 // Warm the encoder probe early so the modal never has to wait on it.
-app.whenReady().then(() => { detectEncoders(); detectFilters(); });
+app.whenReady().then(() => { if (gotLock) { detectEncoders(); detectFilters(); } });

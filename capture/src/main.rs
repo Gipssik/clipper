@@ -138,6 +138,8 @@ fn usage() {
     eprintln!("    --bitrate <bps>        override the tier's mean bitrate");
     eprintln!("    --max-bitrate <bps>    override the tier's peak bitrate");
     eprintln!("    --mode <m>             always | game (default always)");
+    eprintln!("    --game <exe>           count this process as a game in game mode");
+    eprintln!("    --whole-screen         in game mode, record the screen around a windowed game too");
     eprintln!("    --no-audio             video only");
     eprintln!("    --no-mic               desktop audio only");
     eprintln!("    --noise <0-100>        suppress noise on the microphone at that strength");
@@ -830,6 +832,10 @@ fn config_from_args(args: &[String]) -> config::Config {
     config.audio.noise_suppression = flag(args, "--noise").is_some();
     config.audio.noise_strength = number(args, "--noise", 70.0);
     config.record_mode = flag(args, "--mode").unwrap_or("always").to_string();
+    // What `--mode game` treats as a game without waiting for the classifier, so a window with
+    // known content can stand in for one; and the switch for cropping to it.
+    config.include_processes = flag(args, "--game").map(|g| vec![g.to_string()]).unwrap_or_default();
+    config.game_window_only = !present(args, "--whole-screen");
     config.per_game_subfolder = present(args, "--per-game");
     config.tone_map = if present(args, "--sdr") { "off".into() } else { "auto".into() };
     config.monitor.friendly = flag(args, "--monitor").unwrap_or("").to_string();

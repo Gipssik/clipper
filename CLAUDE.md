@@ -113,6 +113,20 @@ killed instance leaves a husk (exe, no `resources/`) that launches at sign-in an
 ICU data. `repairAutostart()` re-points such entries on launch; it reads the Run key with `reg.exe`
 because Electron's `launchItems` only lists entries whose path already matches.
 
+**Each portable launch must unpack into its own folder: `"portable": { "unpackDirName": true }`.**
+electron-builder's default is a folder named by a ksuid fixed *at build time*, so every launch of one
+build shares it — and the launcher runs `RMDir /r` on it before extracting and again after its app
+exits. Double-clicking the exe while Clipper was open therefore deleted `ffmpeg.exe`,
+`clipper-capture.exe`, the locales and `resources.pak` from under the running copy (only files it
+held open survived), leaving it unable to make a thumbnail or restart its recorder. The docs say
+`false` selects the per-launch `$PLUGINSDIR` folder; in 24.13.3 `false` falls through to the ksuid
+exactly like leaving it out, and `true` is what reaches `$PLUGINSDIR`. Check the unpack path of a
+running copy in a new build (`Win32_Process.ExecutablePath`) if electron-builder is upgraded.
+
+The same launch also exercised the single-instance lock: `app.quit()` is asynchronous and does not
+cancel queued `whenReady` work, so the refused copy built a window, a tray icon and ffmpeg probes
+before it went. Startup is gated on `gotLock` for that reason.
+
 Read the state back with **`executableWillLaunchAtLogin`, never `openAtLogin`** — this costs an hour
 to rediscover. On Windows `openAtLogin` is computed by comparing the registered command line against
 the `args` you pass in, and Electron drops `--hidden` from the args it parses back out of the
@@ -141,6 +155,14 @@ daemon alive (`captureWanted()` in both `main.js` and `renderer.js`), and the pa
 settings stay live while either is on — `.for-replay` / `.for-record` fade with their own switch.
 Do not reach for a second encoder; see "Recording on demand" in `capture/DESIGN.md`.
 
+**A windowed game is cropped, not captured as a window.** `gameWindowOnly` (default on, `game` mode
+only) records a game that is in front but not full-screen as its own client area, scaled to fill the
+frame and letterboxed. The capture stays on the monitor; `foreground::game_area` reads the rectangle
+every tick and `Converter::set_crop` turns it into shader constants, so the encoder's size never
+changes and nothing rebuilds. Do not switch to WGC window capture for this — see "A windowed game is
+cropped out of the monitor capture" in `capture/DESIGN.md`. `clipper-capture record --mode game
+--game electron.exe` against a harness window exercises it; `--whole-screen` turns it off.
+
 **Only the alternative binds take controller buttons.** `altHotkey` and `record.altHotkey` are a key
 combination or `Name / Button N [VID:PID]`; `gamepad.rs` reads wheels and button boxes through Raw
 Input, and runs only while such a bind exists or the panel is capturing one — a force-feedback base
@@ -155,6 +177,27 @@ to NVIDIA's overlay on a typical gaming machine. The daemon reports this as `hot
 status, and the panel shows a persistent warning under the field. It is deliberately not a toast:
 the setting reads back exactly as the user chose it, so the only clue something is wrong is the one
 the field carries.
+
+**Updates come from GitHub Releases alone, and the release is the contract.** The "Updates"
+section of `main.js` asks `api.github.com/repos/Gipssik/clipper/releases/latest`, compares its tag
+with `package.json`'s version, and on the user's say-so downloads the asset for this kind of
+install — matched by name, `Clipper Setup X.exe` for the installer and `Clipper X.exe` for the
+portable build (GitHub stores the spaces as dots) — and verifies it against the SHA-256 digest the
+API reports. So a release that renames its artifacts, or tags something other than `vX.Y.Z`,
+breaks updating for everyone already installed. Nothing is fetched beyond the JSON until the user
+clicks; the prefs live under an `update` key in `prefs.json` that only `main.js` writes.
+
+The portable hand-off has two traps. The new copy is launched while the old one still holds the
+single-instance lock, so it is started with `CLIPPER_UPDATED_FROM_PID` and `waitForPredecessor()`
+blocks until that pid is gone before asking for the lock; without it, the new copy is turned away
+and the user is left with no Clipper. And do not route this through PowerShell: Node's `detached`
+gives a child no console, and `powershell.exe` with no console exits 0 in ~60 ms having run
+nothing, while a non-detached child sits in libuv's kill-on-close job and dies with Clipper. The old
+exe is deleted by the new copy (`removeReplacedPortable`), since its launcher holds it open.
+
+To see the prompt, a harness sets `app.getVersion = () => '3.2.0'` before requiring `main.js`; the
+live check then finds the current release. Run from source the kind is `source` and nothing can
+install — a main-process harness with `isPackaged: true` in the stub reaches the download path.
 
 **A hidden window still draws, and that is on us.** Closing to the tray hides the window rather
 than destroying it, so the renderer stays alive with its caches — but Chromium will not throttle it
@@ -295,6 +338,10 @@ gh release create v2.2.0 \
   --notes-file <notes.md> \
   "dist/Clipper 2.2.0.exe" "dist/Clipper Setup 2.2.0.exe"
 ```
+
+The running app updates itself from this step (see "Updates" above): both files must be attached,
+named as electron-builder names them, and the tag must be `v` + the `package.json` version. The
+release body is what the update prompt shows, so write it for someone deciding whether to restart.
 
 `dist/` is gitignored. Release notes are written for users, not as a changelog: `##` sections per
 feature, explaining what it does and what it costs, in the same voice as the README. Confirm with

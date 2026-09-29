@@ -9,6 +9,10 @@ cbuffer Params : register(b0)
     float  peak;        // brightest the source can go, once white is 1.0
     uint   hdr;         // 1 = linear scRGB source, needs tone mapping
     uint   resampling;  // 1 = the source is larger than the target, so run the real filter
+    float2 cropOrigin;  // the part of the source that is the picture, in source pixels — all of it
+    float2 cropSize;    //   unless the recorder is cropping to a game's window
+    float2 viewOrigin;  // where that picture lands in the destination, as a fraction of it — all of
+    float2 viewSize;    //   it unless a crop of another shape is letterboxed
 };
 
 Texture2D<float4> src  : register(t0);
@@ -55,6 +59,19 @@ float3 bt709_oetf(float3 c)
     return float3(oetf1(c.r), oetf1(c.g), oetf1(c.b));
 }
 
+// Where a destination position lands in the source, in source pixels. With no crop this is just
+// uv * srcSize.
+float2 toSource(float2 uv)
+{
+    return cropOrigin + (uv - viewOrigin) / viewSize * cropSize;
+}
+
+// Outside the picture is the letterbox. Only ever true with a crop.
+bool inBars(float2 uv)
+{
+    return any(uv < viewOrigin) || any(uv >= viewOrigin + viewSize);
+}
+
 // The raw texture read, and nothing else.
 //
 // Filtering happens on these values and the tone map runs once per *output* pixel rather than once
@@ -63,9 +80,15 @@ float3 bt709_oetf(float3 c)
 // that on HDR the filter then works in linear light rather than after the transfer curve, which is
 // the more physically defensible of the two anyway; on SDR the source is already sRGB-encoded, so
 // it is exactly the gamma-space filtering every other video scaler does.
-float3 fetch(float2 uv)
+//
+// Takes a position in source pixels and never reads outside the crop: a bilinear tap on the crop's
+// edge would otherwise blend in a pixel of the desktop around the game, which is a visible line
+// down the side of the picture. With no crop the clamp is exactly what the sampler's own CLAMP
+// addressing did already.
+float3 fetch(float2 p)
 {
-    return src.SampleLevel(samp, uv, 0).rgb;
+    p = clamp(p, cropOrigin + 0.5, cropOrigin + cropSize - 0.5);
+    return src.SampleLevel(samp, p / srcSize, 0).rgb;
 }
 
 float3 toDisplay(float3 c)
@@ -126,11 +149,15 @@ float crWeight(float x)
 
 float3 resample(float2 uv, float2 plane)
 {
-    if (resampling == 0)
-        return toDisplay(fetch(uv));
+    // Black, which the conversion below turns into limited-range black rather than a green bar.
+    if (inBars(uv))
+        return 0.0;
 
-    float2 scale = max(srcSize / plane, 1.0);       // source texels per destination pixel
-    float2 c     = uv * srcSize - 0.5;              // this pixel's centre, as a source texel index
+    if (resampling == 0)
+        return toDisplay(fetch(toSource(uv)));
+
+    float2 scale = max(cropSize / (plane * viewSize), 1.0);  // source texels per destination pixel
+    float2 c     = toSource(uv) - 0.5;              // this pixel's centre, as a source texel index
     float2 r     = min(2.0 * scale, float(MAX_TAPS) * 0.5);  // support, in source texels
     int2   first = int2(floor(c - r)) + 1;          // first source texel inside the support
 
@@ -155,8 +182,7 @@ float3 resample(float2 uv, float2 plane)
         {
             if (wx[x] == 0.0)
                 continue;
-            float2 at = (float2(first + int2(x, y)) + 0.5) / srcSize;
-            acc += (wx[x] * wy[y]) * fetch(at);
+            acc += (wx[x] * wy[y]) * fetch(float2(first + int2(x, y)) + 0.5);
         }
     }
 
@@ -187,12 +213,15 @@ float2 PSChroma(VSOut i) : SV_Target
     if (resampling != 0)
         return rgbToYuv(resample(i.uv, dstSize * 0.5)).yz;
 
+    if (inBars(i.uv))
+        return rgbToYuv(0.0).yz;
+
     // Nothing to resample, but still not a point sample: averaging the four luma-grid positions is
     // what keeps colour edges from aliasing when the two planes disagree about where a pixel is.
     float2 off = 0.5 / dstSize;
-    float3 a = fetch(i.uv + float2(-off.x, -off.y));
-    float3 b = fetch(i.uv + float2( off.x, -off.y));
-    float3 c = fetch(i.uv + float2(-off.x,  off.y));
-    float3 d = fetch(i.uv + float2( off.x,  off.y));
+    float3 a = fetch(toSource(i.uv + float2(-off.x, -off.y)));
+    float3 b = fetch(toSource(i.uv + float2( off.x, -off.y)));
+    float3 c = fetch(toSource(i.uv + float2(-off.x,  off.y)));
+    float3 d = fetch(toSource(i.uv + float2( off.x,  off.y)));
     return rgbToYuv(toDisplay((a + b + c + d) * 0.25)).yz;
 }

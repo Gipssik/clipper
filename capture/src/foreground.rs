@@ -105,6 +105,10 @@ pub struct Foreground {
     /// `gamename.rs`. Falls back to the executable's stem.
     pub title: String,
     pub pid: u32,
+    /// The window itself, as a raw handle. `game_area` reads its client rectangle every tick when
+    /// the recorder is cropping to it; a handle rather than a rectangle, because a window being
+    /// dragged moves far faster than the half-second this is polled at.
+    pub window: isize,
     pub fullscreen: bool,
     /// Confident enough to name a folder after it.
     pub is_game: bool,
@@ -300,6 +304,7 @@ impl Watcher {
             path,
             title: self.title.clone(),
             pid,
+            window: window.0 as isize,
             fullscreen,
             is_game,
             worth_recording,
@@ -433,6 +438,78 @@ fn process_of(window: HWND) -> (u32, String) {
             return (pid, String::new());
         }
         (pid, String::from_utf16_lossy(&buffer[..len as usize]))
+    }
+}
+
+/// Where a window's picture is inside the monitor capture, as `[x, y, width, height]` in the
+/// capture texture's pixels — or None when there is nothing to crop to: the window has gone, is
+/// minimised, sits on another display, is too small to be a game, or already fills the screen.
+///
+/// **The client area, not the window.** The title bar and borders are the desktop's, not the
+/// game's, and the point of cropping is to leave the desktop out.
+///
+/// **In physical pixels, whatever this process is.** The recorder has no DPI manifest, so Windows
+/// hands it coordinates scaled down by the display's scale factor — a 1280×720 window on a 150%
+/// display reads as 853×480. WGC's texture is physical, so the query runs with this thread
+/// switched to per-monitor awareness for its duration, and the monitor's rectangle is read in the
+/// same context so the two agree. The result is still mapped onto `capture` rather than assumed to
+/// equal it, so a mismatch shrinks the crop instead of pointing it at the wrong place.
+pub fn game_area(window: isize, monitor: HMONITOR, capture: (i32, i32)) -> Option<[i32; 4]> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{ClientToScreen, GetMonitorInfoW, MONITORINFO};
+    use windows::Win32::UI::HiDpi::{
+        SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, IsIconic, IsWindow};
+
+    /// Smaller than this is a launcher, a splash or a dialog, not something worth a whole frame.
+    const MIN_SIDE: i32 = 64;
+
+    let window = HWND(window as *mut _);
+    unsafe {
+        if window.is_invalid() || !IsWindow(Some(window)).as_bool() || IsIconic(window).as_bool() {
+            return None;
+        }
+        let previous = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        let mut client = RECT::default();
+        let mut origin = POINT::default();
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        let ok = GetClientRect(window, &mut client).is_ok()
+            && ClientToScreen(window, &mut origin).as_bool()
+            && GetMonitorInfoW(monitor, &mut info).as_bool();
+        if !previous.is_invalid() {
+            SetThreadDpiAwarenessContext(previous);
+        }
+        if !ok {
+            return None;
+        }
+
+        let m = info.rcMonitor;
+        let (mw, mh) = (m.right - m.left, m.bottom - m.top);
+        if mw <= 0 || mh <= 0 || capture.0 <= 0 || capture.1 <= 0 {
+            return None;
+        }
+        // The part of the client area on this monitor. A window hanging off the edge is cropped to
+        // what is on screen; one on another display entirely has nothing here to record.
+        let left = (origin.x).max(m.left);
+        let top = (origin.y).max(m.top);
+        let right = (origin.x + client.right).min(m.right);
+        let bottom = (origin.y + client.bottom).min(m.bottom);
+        if right - left < MIN_SIDE || bottom - top < MIN_SIDE {
+            return None;
+        }
+        // Filling the screen already, give or take a pixel of borderless slop: nothing to crop.
+        if right - left >= mw - 2 && bottom - top >= mh - 2 {
+            return None;
+        }
+
+        let sx = |v: i32| ((v - m.left) as i64 * capture.0 as i64 / mw as i64) as i32;
+        let sy = |v: i32| ((v - m.top) as i64 * capture.1 as i64 / mh as i64) as i32;
+        let (x0, y0, x1, y1) = (sx(left), sy(top), sx(right), sy(bottom));
+        Some([x0, y0, x1 - x0, y1 - y0])
     }
 }
 

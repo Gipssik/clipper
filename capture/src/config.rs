@@ -15,6 +15,12 @@ pub struct Config {
     pub enabled: bool,
     /// "game" records only while a game has focus; "always" records whenever the daemon runs.
     pub record_mode: String,
+    /// In `game` mode, record the game's own window rather than the whole screen when it is not
+    /// full-screen: its client area is cropped out of the monitor capture and scaled to fill the
+    /// frame, letterboxed if its shape differs. See `foreground::game_area`. On by default — a
+    /// windowed game with a strip of desktop, taskbar and a second window around it is a clip of
+    /// the desktop that happens to contain a game.
+    pub game_window_only: bool,
     pub buffer_seconds: f64,
     pub monitor: MonitorSelection,
     pub quality: String,
@@ -126,6 +132,7 @@ impl Default for Config {
             version: 1,
             enabled: true,
             record_mode: "game".into(),
+            game_window_only: true,
             buffer_seconds: 60.0,
             monitor: MonitorSelection::default(),
             quality: "high".into(),

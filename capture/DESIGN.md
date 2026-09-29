@@ -76,6 +76,31 @@ with motion on screen: recorder 3D 1.12% → 1.49% and DWM 3.6% → 7.4% with a 
 lose the GPU's framebuffer compression, and the Catmull-Rom downscale reads every source texel
 several times; the copy pays for the shared surface once. Do not rebuild it without measuring this.
 
+**A windowed game is cropped out of the monitor capture, not captured as a window.** In `game`
+mode with `gameWindowOnly` on (the default), a game that is in front but not full-screen is recorded
+as its own client area, scaled to fill the frame and letterboxed where its shape differs. WGC can
+capture a window directly (`CreateForWindow`), and that was the obvious design; it was not used,
+because the capture item is the thing a pipeline is built around. Focus moving between the game and
+anything else would swap items and rebuild the pipeline, which costs the buffer, and a window
+capture's size is the window's, so every resize would change the encoder's resolution under a ring
+and a recording that cannot change it mid-stream.
+
+Cropping moves none of that. The capture stays on the monitor; `foreground::game_area` reads the
+window's client rectangle every tick — a few user32 calls that send no messages, so a hung game
+cannot stall the recorder — and `Converter::set_crop` turns it into shader constants: a source
+rectangle and the part of the frame it lands in. The encoder never sees a size change. A crop that
+moved forces a conversion instead of a repeat, since the last conversion shows the old rectangle.
+The query runs with the thread switched to per-monitor DPI awareness, because the recorder has no
+manifest and would otherwise read a 1280×720 window on a 150% display as 853×480 against a
+physical-pixel texture. The shader clamps every tap to the crop, so the filter cannot bleed a line
+of desktop into the edge of the picture, and with no crop it is the old full-frame mapping exactly.
+
+Measured with a framed test window in front, at 1920×1080 out of a 2560×1440 display: the clip is
+the window's client area with no title bar or desktop; a 1280×740 client (Electron draws its menu
+into it) fills the frame bar a 26-pixel pillarbox each side; moved and resized to 1000×800 mid-run,
+it is followed on the next tick and pillarboxed at 5:4; `--whole-screen` records the desktop as
+before. What it costs is in "Known limits": the picture is what is on screen in that rectangle.
+
 **Read GPU percentages together with the clock.** Task Manager's figure is the share of each second
 an engine was busy *at its current clock*. An idle RTX 5080 sits in P8 with memory at 405 MHz of
 15001; the recorder's work there reads as 2–3% 3D and 8–10% encode, and the moment enough is moving
@@ -478,6 +503,7 @@ file, written atomically by Electron (temp + rename), schema owned by the daemon
   "version": 1,
   "enabled": true,
   "recordMode": "game",            // "game" | "always"
+  "gameWindowOnly": true,          // in game mode, crop a windowed game out of the screen
   "bufferSeconds": 60,             // min 30, max 600
   "monitor": { "device": "\\\\.\\DISPLAY1", "friendly": "LG HDR 4K" },
   "quality": "high",               // tier -> { maxHeight, fps, bitrate, codec }
@@ -1278,6 +1304,13 @@ ordinary sizes to passing through unchanged.
 - **Elevated games swallow the hotkey.** `RegisterHotKey` from a normal-integrity process never
   sees keys while an admin-elevated game has focus. A low-level keyboard hook has the same
   limitation. The only real fix is running the daemon elevated, e.g. via a scheduled task at logon.
+- **A window on top of a windowed game is in the clip.** Cropping takes whatever the screen shows in
+  the game's rectangle, so a notification or a window dragged over the game is recorded, and on
+  Windows 11 the rounded bottom corners of the game's window show a few pixels of what is behind it.
+  Capturing the window itself would not have this, and is not used for the reasons under
+  "A windowed game is cropped out of the monitor capture".
+- **A windowed game on another display is recorded whole-screen.** The crop only exists inside the
+  display being captured; a game on a different one falls back to recording the chosen display.
 - **Protected content captures black** (Netflix, some DRM overlays). By design, unavoidable.
 - **Anti-cheat.** WGC is a documented Microsoft API used by OBS and Xbox Game Bar and we inject
   nothing, so this should be fine — flagged because "should be fine" is not "verified".
